@@ -34,6 +34,7 @@ pub(crate) mod global_shortcut;
 #[cfg(all(windows, feature = "gpui-shell"))]
 pub(crate) mod keyboard;
 pub(crate) mod local_paths;
+pub(crate) mod pane_cwd;
 pub mod notifications;
 pub(crate) mod pi_session;
 pub(crate) mod process;

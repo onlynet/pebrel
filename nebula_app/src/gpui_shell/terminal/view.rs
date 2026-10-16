@@ -83,6 +83,16 @@ const SELECTION_SCROLL_STEP: f32 = 20.0;
 /// 这个值到 +1s；取 1.2s 是为了让它至少跨过一个复核点，不会一闪就没。
 pub(super) const COMPLETION_FLASH: std::time::Duration = std::time::Duration::from_millis(1200);
 
+/// 远端回合停滞对账的阈值：hook 权威在场的回合静默这么久、且屏幕连续两拍是
+/// agent 自家的同一形态，才允许双向对账（见
+/// `ai_hook::lifecycle::AgentActivity::reconcile_stalled_turn`）：两拍 idle
+/// 提示符把回合收敛为结束；两拍转圈把丢了点火事件（UserPromptSubmit/权限
+/// 答复在远端 bridge 丢失）的回合从 Done/Blocked 拉回 Working。这是远端的
+/// 第二重证据——本地有进程树对账，SSH/WSL 没有进程可见性，hook 一旦在远端
+/// bridge 丢失，回合会钉死在丢失前的状态。权限等待屏是 Blocked 检测、不参与
+/// 对账；真正的防线是「稳定的屏幕形态」而非纯计时。
+pub(super) const REMOTE_TURN_STALL: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// 一次自动回滚该滚几行：指针在网格上方为正（往回滚历史）、下方为负，网格
 /// 内为 0。贴边即 1 行，之后每远离 `SELECTION_SCROLL_STEP` 像素加一档。
 ///
@@ -116,6 +126,39 @@ fn restart_cursor_blink_phase(cursor_visible: &mut bool, cursor_blink_epoch: &mu
     *cursor_visible = true;
     *cursor_blink_epoch = cursor_blink_epoch.wrapping_add(1);
     *cursor_blink_epoch
+}
+
+/// 空闲停闪的静默阈值：输入与 PTY 输出连续静默这么久后，750ms 翻转链
+/// 停止翻转、保持常亮并断链（Windows Terminal 的空闲停闪惯例）。静止终端
+/// 由此不再产生任何渲染帧；任何输入/输出/IME/模式事件走
+/// `restart_cursor_blink` 立即重启。输出只刷新静默计时，不停链重启。
+const CURSOR_BLINK_IDLE_PAUSE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// 纯判定：静默时长是否已到停闪阈值。
+fn cursor_blink_silence_pauses(silence: std::time::Duration) -> bool {
+    silence >= CURSOR_BLINK_IDLE_PAUSE
+}
+
+/// 输出驱动帧的最小间隔（WezTerm 同款合并）：PTY 每读到一批就发一次
+/// Wakeup，TUI 动画高频输出时逐批 `cx.notify()` 逐帧渲染；8ms 下限把风暴
+/// 收敛到 ≤125fps，视觉上无差别（远高于显示器刷新率的渲染本就丢帧）。
+const OUTPUT_FRAME_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// 输出帧的合并决策（纯函数）：距上一帧不足最小间隔就并入一次尾帧
+/// （等待剩余时长补渲染），否则立即渲染。
+#[derive(Debug, PartialEq, Eq)]
+enum OutputFrameTiming {
+    Now,
+    Trail(std::time::Duration),
+}
+
+fn output_frame_timing(since_last_frame: Option<std::time::Duration>) -> OutputFrameTiming {
+    match since_last_frame {
+        Some(elapsed) if elapsed < OUTPUT_FRAME_MIN_INTERVAL => {
+            OutputFrameTiming::Trail(OUTPUT_FRAME_MIN_INTERVAL - elapsed)
+        },
+        _ => OutputFrameTiming::Now,
+    }
 }
 
 /// 粘贴体量按「落到终端算几行」数，不用 `str::lines`。
@@ -308,8 +351,21 @@ pub struct TerminalView {
     pub cwd: String,
     /// 同上标题协议的 git 分支字段（当前仅存备用）。
     pub branch: String,
+    /// 远端 shell 集成经 `SetUserVar=pebrel_git_root` 上报的仓库根（空 = 不在
+    /// 仓库内，离开仓库即清空）。本地与远端 pane 都会收到——rc 是同一份——
+    /// 但只有 SSH pane 的侧栏项目分组消费它。
+    pub git_root: String,
     /// 标题协议第 4 字段：远端 `nebula ssh` 上报的运行中程序，本地为空。
     pub running_program: Option<String>,
+    /// shell 最近一次自报 cwd（OSC 7 / `NEBULA|` 标题）的时刻，无论值是否
+    /// 变化——它证明的是**信道活着**。超时没有自报的 pane 视为「shell 不
+    /// 自报」（嵌套 bash/zsh、cmd），cwd 改由进程树兜底源接管（见
+    /// `runtime::probe_process_cwd`）；远端兜底探测同样用它判陈旧。
+    pub(crate) cwd_reported_at: Option<std::time::Instant>,
+    /// 进程树 cwd 兜底探测在后台在途（同一时刻至多一条）。
+    process_cwd_probe: Option<gpui::Task<()>>,
+    /// 上次进程树 cwd 探测的时刻，节流用。
+    last_cwd_probe: Option<std::time::Instant>,
     /// OSC 133;C 起、133;D 止：命令正在执行。自带 PowerShell prompt 靠
     /// `NEBULA|` 标题报 `running_program`，装了 OSC133 集成的 bash/zsh/nu 只
     /// 发这一对语义标记——两条路都要能点亮侧栏的「运行中」。
@@ -322,6 +378,9 @@ pub struct TerminalView {
     command_started: Option<std::time::Instant>,
     /// 上次跑进程树探测的时刻，用于节流。
     last_process_probe: Option<std::time::Instant>,
+    /// 看门狗的进程树探测在后台线程在途：缓存未命中时 `ps` 全机枚举可阻塞
+    /// 秒级，主线程只收结果；同一时刻至多一条在途。
+    activity_probe_pending: bool,
     prompt_process_probe: Option<gpui::Task<()>>,
     prompt_input_epoch: u64,
     native_prompt_seen: bool,
@@ -374,7 +433,6 @@ pub struct TerminalView {
     /// 反算 `display_offset`，拇指不会在按下那一刻跳到指针中心。
     scrollbar_drag: Option<f32>,
     scrollbar_hovered: bool,
-    scrollbar_visibility: nebula_settings::ScrollbarVisibility,
     origin: Point<Pixels>,
     cell_width: Pixels,
     line_height: Pixels,
@@ -429,12 +487,23 @@ pub struct TerminalView {
     cursor_visible: bool,
     cursor_animation: cursor::CursorAnimation,
     cursor_blink_epoch: u64,
+    /// 最近一次「用户可感知的活动」时刻（输入 / PTY 输出 / IME / 模式变化
+    /// 都刷新）。翻转链每 tick 对照 [`CURSOR_BLINK_IDLE_PAUSE`]：静默满阈值
+    /// 即停闪断链，把静止终端的渲染帧归零。
+    cursor_blink_last_activity: std::time::Instant,
+    /// 停闪断链后为 true：PTY 输出到来时据此（且仅据此）重启闪烁——输出
+    /// 期间只刷新静默计时，不逐批重启相位。
+    cursor_blink_paused: bool,
     /// OS 窗口前台状态与 pane 内焦点是两层独立条件。缓存它们是因为 blink
     /// timer 回调没有 `Window`，状态变化由 GPUI observer 立即重启相位。
     cursor_window_active: bool,
     cursor_pane_focused: bool,
     /// Workspace presentation is independent of keyboard/window focus.
     output_visible: bool,
+    /// 上一次输出驱动帧的时刻（[`Self::schedule_output_frame`] 的合并基准）。
+    last_output_frame: Option<std::time::Instant>,
+    /// 在途的输出尾帧定时器（间隔内批次的补帧）。
+    output_trailing_frame: Option<gpui::Task<()>>,
     _cursor_blink_subscriptions: [gpui::Subscription; 3],
     /// 最近一次由设置页下发的默认样式。只在它真正变化时清理 shell 的
     /// DECSCUSR/DEC mode 12 覆盖，避免无关设置变更打断 vim 等程序光标。
@@ -538,6 +607,12 @@ impl TerminalView {
         }
         if self.output_visible != visible {
             self.cursor_animation.reset();
+            if !visible {
+                // 隐藏即输出帧时间线的终结：恢复可见后的第一批输出按「无上一
+                // 帧」立即渲染。不清的话，快速翻转（隐藏不足 8ms）会让恢复后
+                // 的首批输出并入隐藏前遗留的合并窗口，白等一个尾帧才上屏。
+                self.last_output_frame = None;
+            }
 
             super::effects::visibility_changed(self, cx);
         }
@@ -559,6 +634,14 @@ impl TerminalView {
 
     pub(super) fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         let cwd_changed = cwd_report::apply(&mut self.cwd, &event);
+        // 信道活性：自报到过（无论值是否变化）就证明 shell 会在上报 cwd，
+        // 进程树兜底源据此退避——只有真正不自报的 shell（嵌套 bash/zsh、
+        // cmd）才付进程枚举的钱。
+        if matches!(&event, TermEvent::CwdReport(_))
+            || matches!(&event, TermEvent::Title(title) if title.starts_with("NEBULA|"))
+        {
+            self.cwd_reported_at = Some(std::time::Instant::now());
+        }
         // Both shell metadata channels update completion and directory history.
         if cwd_changed
             || ((matches!(&event, TermEvent::CwdReport(_))
@@ -575,9 +658,18 @@ impl TerminalView {
                 self.observe_reading_output(cx);
                 self.flush_pending_runtime_submit(cx);
                 self.flush_pending_shell_command(cx);
-                if self.output_visible {
-                    cx.notify();
+                // 不自报 cwd 的 shell（嵌套 bash/zsh、cmd）没有任何元数据
+                // 事件，PTY 输出是唯一的跟随时机：cd 必然伴随输出（提示符
+                // 重绘），在输出沿上探测进程树 cwd。
+                self.probe_process_cwd(cx);
+                // PTY 输出也是「活动」：只刷新停闪静默计时，链活着就不动；
+                // 已停闪断链才重启闪烁（逐批重启相位会让输出风暴期光标
+                // 常亮并额外加帧）。
+                self.cursor_blink_last_activity = std::time::Instant::now();
+                if self.cursor_blink_paused {
+                    self.restart_cursor_blink(cx);
                 }
+                self.schedule_output_frame(cx);
             },
             TermEvent::MouseCursorDirty => {
                 cx.notify();
@@ -661,6 +753,24 @@ impl TerminalView {
                     cx.emit(TerminalViewEvent::TitleChanged);
                     cx.notify();
                 }
+                // 无集成的嵌套交互 shell（Cygwin fish、MSYS bash…）没有
+                // 133;D 完成边：Enter 提交靠弱推断标记运行中，而接管终端的
+                // shell 永远等不到宿主 shell 的 133;D，转圈就此挂死（用户
+                // 10-10「进入 fish 后一直 Running」）。OSC 7 恰好随这类 shell
+                // 的每次提示符渲染到达——那正是「命令结束、回到提示符」的
+                // 事实。带集成的 shell 先收到 133;D，这里只是幂等兜底；hook
+                // 拥有的 agent 会话不走这条弱边。
+                if self.command_running
+                    && !self.command_running_disproved
+                    && !self.agent_activity.hook_seen()
+                {
+                    self.command_running = false;
+                    self.command_started = None;
+                    self.last_process_probe = None;
+                    self.prompt_process_probe = None;
+                    self.last_prompt_process_probe = None;
+                    cx.notify();
+                }
             },
             TermEvent::InlineImage { data, abs_line, width, height } => {
                 let cell_height = f32::from(self.window_size.cell_height.max(1));
@@ -715,6 +825,16 @@ impl TerminalView {
                     && self.suggest.suggest_env.is_this_machine()
                 {
                     self.on_native_cmd_prompt(cx);
+                }
+                // 远端仓库根（进出仓库的变化沿才发）：侧栏 SSH 项目分组键的
+                // 输入，值变化走 TitleChanged → resolve_project_group 的现成
+                // 打点链。本地 pane 只存不用。
+                if name == "pebrel_git_root" {
+                    let root = value.trim().to_owned();
+                    if self.git_root != root {
+                        self.git_root = root;
+                        cx.emit(TerminalViewEvent::TitleChanged);
+                    }
                 }
                 self.suggest.completion_shell_report(&name, &value);
                 self.handle_completion_editor_report(&name, &value, cx);
@@ -820,6 +940,8 @@ impl TerminalView {
     }
 
     fn restart_cursor_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_blink_last_activity = std::time::Instant::now();
+        self.cursor_blink_paused = false;
         let epoch =
             restart_cursor_blink_phase(&mut self.cursor_visible, &mut self.cursor_blink_epoch);
         self.schedule_cursor_blink_tick(epoch, cx);
@@ -841,6 +963,17 @@ impl TerminalView {
                     }
                     return;
                 }
+                // 空闲停闪：静默满阈值后保持常亮并断链。链死了就没有下一
+                // tick，静止终端的渲染帧归零；恢复由 restart_cursor_blink
+                // （输入/IME/模式）与 PTY 输出（Wakeup 里按 paused 重启）负责。
+                if cursor_blink_silence_pauses(view.cursor_blink_last_activity.elapsed()) {
+                    view.cursor_blink_paused = true;
+                    if !view.cursor_visible {
+                        view.cursor_visible = true;
+                        cx.notify();
+                    }
+                    return;
+                }
                 view.cursor_visible = !view.cursor_visible;
                 view.schedule_cursor_blink_tick(epoch, cx);
                 cx.notify();
@@ -851,6 +984,39 @@ impl TerminalView {
 
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+
+    /// 输出驱动的渲染帧按 [`OUTPUT_FRAME_MIN_INTERVAL`] 合并：间隔内的批次
+    /// 只挂一次尾帧定时器（在途则不重挂，最早的补点生效），间隔外立即渲染
+    /// 并取消等待中的尾帧。邮箱侧的 Wakeup 原子去重只塌缩「已有一条在排队」
+    /// 的并发，持续输出流仍近似逐帧——这里的下限才是风暴期的节流阀。
+    fn schedule_output_frame(&mut self, cx: &mut Context<Self>) {
+        if !self.output_visible {
+            return;
+        }
+        match output_frame_timing(self.last_output_frame.map(|at| at.elapsed())) {
+            OutputFrameTiming::Now => {
+                self.output_trailing_frame = None;
+                self.last_output_frame = Some(std::time::Instant::now());
+                cx.notify();
+            },
+            OutputFrameTiming::Trail(wait) => {
+                if self.output_trailing_frame.is_some() {
+                    return;
+                }
+                let executor = cx.background_executor().clone();
+                self.output_trailing_frame = Some(cx.spawn(async move |this, cx| {
+                    executor.timer(wait).await;
+                    let _ = this.update(cx, |view, cx| {
+                        view.output_trailing_frame = None;
+                        if view.output_visible {
+                            view.last_output_frame = Some(std::time::Instant::now());
+                            cx.notify();
+                        }
+                    });
+                }));
+            },
+        }
     }
 
     fn on_bell(&mut self, cx: &mut Context<Self>) {
@@ -971,7 +1137,6 @@ impl TerminalView {
         }
         self.palette = palette;
         self.copy_on_select = copy_on_select;
-        self.scrollbar_visibility = settings.scrollbar_visibility;
         self.default_cursor_style = default_cursor_style;
         if let Some(session) = &self.session {
             let mut term = session.term.lock();
@@ -1004,7 +1169,15 @@ impl TerminalView {
     /// `is_dir` at the host boundary and are left to the SFTP adapter.
     pub fn local_cwd(&self) -> Option<std::path::PathBuf> {
         let path = std::path::PathBuf::from(self.cwd.trim());
-        path.is_dir().then_some(path)
+        if path.is_dir() {
+            return Some(path);
+        }
+        // 无集成的嵌套 shell（fish、MSYS bash…）按 `$PWD` 原样上报挂载形态
+        // （`/d/…`、`/cygdrive/d/…`、WSL fish 的 `/mnt/d/…`）。原样 `is_dir`
+        // 必为假，先折回宿主盘再验一次——与左侧分组同一变换（10-10 修分组
+        // 时两侧就分叉了），右侧文件树/Git 视图由此跟进 fish 的 cwd。
+        let folded = crate::shell_detect::mounted_host_path(self.cwd.trim())?;
+        folded.is_dir().then_some(folded)
     }
 
     /// WSL 发行版：spawn 时 pin 进启动参数的 [`crate::shell_detect::wsl_spawn_distro`]
@@ -1020,6 +1193,30 @@ impl TerminalView {
         self.ssh_destination.as_ref()?;
         let path = self.cwd.as_str();
         (path.starts_with('/') && !path.chars().any(char::is_control)).then(|| path.to_owned())
+    }
+
+    /// shell 是否仍在自报 cwd（OSC 7/`NEBULA|` 标题在 `within` 内到过）。
+    /// 自报健在的 pane 不需要兜底源——自报更及时也更便宜。
+    pub fn cwd_self_reporting(&self, within: std::time::Duration) -> bool {
+        self.cwd_reported_at.is_some_and(|at| at.elapsed() < within)
+    }
+
+    /// 进程树兜底源回填 cwd：与 OSC 7 同一入口语义（更新 `cwd` 并广播
+    /// TitleChanged），分组、抽屉、Git 面板一齐跟随——所有消费方只认这一
+    /// 份 pane 身份。只接受宿主可见目录；兜底源读的是真实进程 cwd，防御性
+    /// 再验一次，坏值不进身份。
+    pub fn adopt_process_cwd(&mut self, path: &str, cx: &mut Context<Self>) {
+        let path = path.trim();
+        if path.is_empty()
+            || path == self.cwd
+            || !std::path::Path::new(path).is_absolute()
+            || !std::path::Path::new(path).is_dir()
+        {
+            return;
+        }
+        self.cwd = path.to_owned();
+        cx.emit(TerminalViewEvent::TitleChanged);
+        cx.notify();
     }
 
     /// 这个 pane 的远端身份，仅当会话**已经就绪**时才给。

@@ -151,3 +151,4 @@ dist-pack-*/
 
 NebulaTerminal-*/
 *-preview-package/
+/.agents/
