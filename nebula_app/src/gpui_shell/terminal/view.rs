@@ -83,6 +83,16 @@ const SELECTION_SCROLL_STEP: f32 = 20.0;
 /// 这个值到 +1s；取 1.2s 是为了让它至少跨过一个复核点，不会一闪就没。
 pub(super) const COMPLETION_FLASH: std::time::Duration = std::time::Duration::from_millis(1200);
 
+/// 远端回合停滞对账的阈值：hook 权威在场的回合静默这么久、且屏幕连续两拍是
+/// agent 自家的同一形态，才允许双向对账（见
+/// `ai_hook::lifecycle::AgentActivity::reconcile_stalled_turn`）：两拍 idle
+/// 提示符把回合收敛为结束；两拍转圈把丢了点火事件（UserPromptSubmit/权限
+/// 答复在远端 bridge 丢失）的回合从 Done/Blocked 拉回 Working。这是远端的
+/// 第二重证据——本地有进程树对账，SSH/WSL 没有进程可见性，hook 一旦在远端
+/// bridge 丢失，回合会钉死在丢失前的状态。权限等待屏是 Blocked 检测、不参与
+/// 对账；真正的防线是「稳定的屏幕形态」而非纯计时。
+pub(super) const REMOTE_TURN_STALL: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// 一次自动回滚该滚几行：指针在网格上方为正（往回滚历史）、下方为负，网格
 /// 内为 0。贴边即 1 行，之后每远离 `SELECTION_SCROLL_STEP` 像素加一档。
 ///
@@ -659,6 +669,23 @@ impl TerminalView {
                     // 循环；侧栏标题画在 workspace 里，cwd 变了必须发
                     // TitleChanged，`on_terminal_event` 才会 `cx.notify()` 重绘。
                     cx.emit(TerminalViewEvent::TitleChanged);
+                    cx.notify();
+                }
+                // 无集成的嵌套交互 shell（Cygwin fish、MSYS bash…）没有
+                // 133;D 完成边：Enter 提交靠弱推断标记运行中，而接管终端的
+                // shell 永远等不到宿主 shell 的 133;D，转圈就此挂死。OSC 7
+                // 恰好随这类 shell 的每次提示符渲染到达——那正是「命令结束、
+                // 回到提示符」的事实。带集成的 shell 先收到 133;D，这里只是
+                // 幂等兜底；hook 拥有的 agent 会话不走这条弱边。
+                if self.command_running
+                    && !self.command_running_disproved
+                    && !self.agent_activity.hook_seen()
+                {
+                    self.command_running = false;
+                    self.command_started = None;
+                    self.last_process_probe = None;
+                    self.prompt_process_probe = None;
+                    self.last_prompt_process_probe = None;
                     cx.notify();
                 }
             },
