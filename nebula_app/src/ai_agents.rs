@@ -13,7 +13,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use regex::Regex;
@@ -485,6 +486,20 @@ struct CompiledGate {
 struct Cache {
     manifests: HashMap<AgentKind, CompiledManifest>,
     last_override_scan: Instant,
+    /// manifest 集合的世代：override 磁盘变更触发重建时递增。identify/detect
+    /// 的结果记忆以它为键的一部分——规则变了，旧结论整批失效。
+    generation: u64,
+}
+
+/// manifest 世代发号器：`cache()` 初始化与 override 重建各领一个新号。
+static MANIFEST_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn next_manifest_generation() -> u64 {
+    MANIFEST_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+fn manifest_generation() -> u64 {
+    cache().read().map(|guard| guard.generation).unwrap_or(0)
 }
 
 /// Skeleton rules merged into every manifest below (and into user overrides).
@@ -517,7 +532,11 @@ static CACHE: OnceLock<RwLock<Cache>> = OnceLock::new();
 
 fn cache() -> &'static RwLock<Cache> {
     CACHE.get_or_init(|| {
-        RwLock::new(Cache { manifests: build_cache(), last_override_scan: Instant::now() })
+        RwLock::new(Cache {
+            manifests: build_cache(),
+            last_override_scan: Instant::now(),
+            generation: next_manifest_generation(),
+        })
     })
 }
 
@@ -598,14 +617,46 @@ fn refresh_overrides_if_needed() {
     });
     if changed {
         guard.manifests = build_cache();
+        guard.generation = next_manifest_generation();
     }
 }
+
+/// identify/detect 的单槽结果记忆：看门狗每秒对**静止屏幕**重复问同一份
+/// 文本，纯函数结论不变，直接复用——省掉的是 gate 正则与小写拷贝，**调用
+/// 节奏一分不减**：observe_screen 的逐秒样本累积（Working→Idle 需连续两拍）
+/// 必须照常发生。缓存绝不能上移到 `refresh_agent_screen_state` 整段——Fleet
+/// （Pebrel 的 GPUI 壳分叉）2026-10-12 的回归教训：第一版整段短路导致 agent
+/// 进入后永远显示 Running。键带 manifest 世代，override 变更后整批失效；
+/// 单槽即可（同屏多 pane 各自命中自己的槽位交替，静止场景全是同一键）。
+static IDENTIFY_MEMO: LazyLock<Mutex<Option<(u64, String, Option<AgentKind>)>>> =
+    LazyLock::new(|| Mutex::new(None));
+static DETECT_MEMO: LazyLock<Mutex<Option<(u64, String, String, Option<Detection>)>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// Match one live screen snapshot. No match is `None`: callers retain their
 /// higher-confidence hook/process state rather than fabricating idle.
 pub fn detect(program: &str, screen: &str) -> Option<Detection> {
     let agent = AgentKind::parse(program)?;
     refresh_overrides_if_needed();
+    let generation = manifest_generation();
+    {
+        let memo = DETECT_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((memo_generation, memo_program, memo_screen, hit)) = memo.as_ref()
+            && *memo_generation == generation
+            && memo_program == program
+            && memo_screen == screen
+        {
+            return hit.clone();
+        }
+    }
+    let result = detect_from_manifests(agent, screen);
+    let mut memo = DETECT_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *memo = Some((generation, program.to_owned(), screen.to_owned(), result.clone()));
+    result
+}
+
+/// [`detect`] 的未缓存内核（单测直接打到这里的都是行为断言，不经过记忆）。
+fn detect_from_manifests(agent: AgentKind, screen: &str) -> Option<Detection> {
     let guard = cache().read().ok()?;
     let loaded = guard.manifests.get(&agent)?;
     let attention_screen = screen_context::attention_region(agent, screen);
@@ -636,6 +687,24 @@ pub fn detect(program: &str, screen: &str) -> Option<Detection> {
 /// where Toolhelp can see `wsl.exe` but not the Linux `codex` process behind it.
 pub fn identify(screen: &str) -> Option<AgentKind> {
     refresh_overrides_if_needed();
+    let generation = manifest_generation();
+    {
+        let memo = IDENTIFY_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((memo_generation, memo_screen, hit)) = memo.as_ref()
+            && *memo_generation == generation
+            && memo_screen == screen
+        {
+            return *hit;
+        }
+    }
+    let result = identify_from_manifests(screen);
+    let mut memo = IDENTIFY_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *memo = Some((generation, screen.to_owned(), result));
+    result
+}
+
+/// [`identify`] 的未缓存内核。
+fn identify_from_manifests(screen: &str) -> Option<AgentKind> {
     let guard = cache().read().ok()?;
     let mut found = None;
     for (agent, loaded) in &guard.manifests {
@@ -726,13 +795,23 @@ fn compile_gate(gate: &Gate) -> Result<CompiledGate, String> {
 
 impl CompiledGate {
     fn matches(&self, text: &str) -> bool {
-        let lower = text.to_lowercase();
-        self.contains.iter().all(|needle| lower.contains(needle))
+        // 小写拷贝惰性做一次、嵌套 gate 复用同一份：此前每个 gate（含
+        // all/any/not 的递归）各自 `to_lowercase` 整段拷一遍——identify 的
+        // 20 套 manifest 在同一份屏幕上每秒最多拷几十次。contains 为空的
+        // gate 一次也不拷。
+        let mut lower = None;
+        self.matches_with(text, &mut lower)
+    }
+
+    fn matches_with(&self, text: &str, lower: &mut Option<String>) -> bool {
+        self.contains
+            .iter()
+            .all(|needle| lower.get_or_insert_with(|| text.to_lowercase()).contains(needle))
             && self.regex.iter().all(|regex| regex.is_match(text))
             && self.line_regex.iter().all(|regex| text.lines().any(|line| regex.is_match(line)))
-            && self.all.iter().all(|gate| gate.matches(text))
-            && (self.any.is_empty() || self.any.iter().any(|gate| gate.matches(text)))
-            && !self.not_gate.iter().any(|gate| gate.matches(text))
+            && self.all.iter().all(|gate| gate.matches_with(text, lower))
+            && (self.any.is_empty() || self.any.iter().any(|gate| gate.matches_with(text, lower)))
+            && !self.not_gate.iter().any(|gate| gate.matches_with(text, lower))
     }
 }
 
@@ -1011,6 +1090,30 @@ mod tests {
         let screen = "OpenAI Codex (v0.42.0)\n\n› Ask Codex to do anything";
         assert_eq!(identify(screen), Some(AgentKind::Codex));
         assert_eq!(identify("› generic shell prompt"), None);
+    }
+
+    /// 记忆化是纯函数内部的事：同一份屏幕重复询问必须给出同一结论，不同
+    /// 屏幕各自重算。缓存绝不能改变调用方的节奏（observe_screen 逐秒样本
+    /// 累积），这里只钉「同键同值、异键重算」。
+    #[test]
+    fn detection_memo_returns_stable_results_per_screen() {
+        let screen = "✻ Baked for 15m 24s\n\
+                      ────────────────────────────────────────\n\
+                      ❯ \n\
+                      ────────────────────────────────────────\n\
+                      \x20 ⏸ manual mode on · ? for shortcuts · ← for agents";
+        let first = detect("claude", screen).unwrap();
+        let second = detect("claude", screen).unwrap();
+        assert_eq!(first.rule_id, second.rule_id);
+        assert_eq!(first.status, second.status);
+        // 屏幕一变即重算（不命中旧槽位）。
+        let working = format!("{screen}\n\x20 esc to interrupt");
+        let flipped = detect("claude", &working).unwrap();
+        assert_ne!(flipped.status, first.status);
+        // 换回旧屏幕，结论回到旧值。
+        assert_eq!(detect("claude", screen).unwrap().rule_id, first.rule_id);
+        // identify 同一屏幕重复询问结论稳定。
+        assert_eq!(identify(screen), identify(screen));
     }
 
     /// 下面四段都是 2026-08-22 用 runtime `pane.read` 从真实窗口抓的原文，
