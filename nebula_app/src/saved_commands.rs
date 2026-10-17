@@ -1,7 +1,6 @@
 //! User-managed shell commands shown by the GPUI command manager.
 
 pub(crate) mod builtins;
-mod bulk;
 mod groups;
 pub(crate) use groups::BUILTIN_GROUP_ID;
 
@@ -189,10 +188,17 @@ impl SavedCommands {
     pub(crate) fn remove(&mut self, id: &str) -> io::Result<()> {
         let path = self.path.clone();
         let (next, ()) = mutate_store(&path, |store| {
-            if !is_builtin_id(id) && !store.commands.iter().any(|saved| saved.id == id) {
-                return Err(io::Error::new(io::ErrorKind::NotFound, "saved command not found"));
+            if is_builtin_id(id) {
+                store.deleted_builtins.insert(id.to_owned());
+                store.organization.membership.remove(id);
+                return Ok(());
             }
-            store.remove_ids(&HashSet::from([id.to_owned()]));
+            let commands = &mut store.commands;
+            let Some(index) = commands.iter().position(|saved| saved.id == id) else {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "saved command not found"));
+            };
+            commands.remove(index);
+            store.organization.membership.remove(id);
             Ok(())
         })?;
         *self = next;

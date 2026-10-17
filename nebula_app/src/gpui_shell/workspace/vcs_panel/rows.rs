@@ -3,7 +3,10 @@ use super::list_model::{RowOps, VcsRow};
 use super::*;
 
 impl NebulaWorkspace {
-    pub(super) fn render_vcs_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(in crate::gpui_shell::workspace) fn render_vcs_list(
+        &self,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui::AnyElement {
         let scroll = self.vcs_list.scroll.clone();
         let owner = cx.entity().downgrade();
         v_flex()
@@ -150,6 +153,14 @@ impl NebulaWorkspace {
                 let is_git = ops != RowOps::Svn;
                 let status = &status;
                 let relative_path = &relative_path;
+                // 远端快照：写操作改走远端 exec、双击开远端文档、本地专属
+                // 入口（merge 编辑器、SVN 菜单/对话框）不画。行选中（本地
+                // 比较 key，自洽）保持可用。
+                let remote = self.vcs_list.remote;
+                let remote_doc =
+                    remote.then(|| self.remote_git.document_target(relative_path)).flatten();
+                // 本地专属动作的剩余门控（远端形态全部为 false）。
+                let local_only = !remote;
                 let discard_confirm = self.vcs_discard_confirm.clone();
                 let path = root
                     .as_ref()
@@ -274,7 +285,9 @@ impl NebulaWorkspace {
                                         == Some(discard_path.as_str())
                                     {
                                         this.vcs_discard_confirm = None;
-                                        if svn_revert {
+                                        if this.vcs_list.remote {
+                                            this.remote_git_discard(&discard_path, cx);
+                                        } else if svn_revert {
                                             this.side_panel.svn_revert_path(&discard_path);
                                         } else {
                                             this.side_panel.git_discard_path(&discard_path);
@@ -301,13 +314,17 @@ impl NebulaWorkspace {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.vcs_discard_confirm = None;
-                                    this.side_panel.git_stage_path(&stage_path);
+                                    if this.vcs_list.remote {
+                                        this.remote_git_stage(&stage_path, cx);
+                                    } else {
+                                        this.side_panel.git_stage_path(&stage_path);
+                                    }
                                     cx.notify();
                                 },
                             )),
                         )
                     })
-                    .when(svn_add, |row| {
+                    .when(local_only && svn_add, |row| {
                         row.child(
                             Button::new(SharedString::from(format!(
                                 "svn-add-{section_id}-{index}"
@@ -327,7 +344,7 @@ impl NebulaWorkspace {
                             )),
                         )
                     })
-                    .when(svn_resolve, |row| {
+                    .when(local_only && svn_resolve, |row| {
                         row.child(
                             Button::new(SharedString::from(format!(
                                 "svn-resolve-{section_id}-{index}"
@@ -347,7 +364,7 @@ impl NebulaWorkspace {
                             )),
                         )
                     })
-                    .when(ops == RowOps::Svn, |row| {
+                    .when(local_only && ops == RowOps::Svn, |row| {
                         // 这一行的完整 SVN 操作集（日志、blame、锁、
                         // 忽略、改名、删除、冲突、属性）都在这个菜单里，
                         // 行内只多一个 ⋯ 位。
@@ -367,13 +384,17 @@ impl NebulaWorkspace {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.vcs_discard_confirm = None;
-                                    this.side_panel.git_unstage_path(&unstage_path);
+                                    if this.vcs_list.remote {
+                                        this.remote_git_unstage(&unstage_path, cx);
+                                    } else {
+                                        this.side_panel.git_unstage_path(&unstage_path);
+                                    }
                                     cx.notify();
                                 },
                             )),
                         )
                     })
-                    .when(ops == RowOps::Conflict && is_git, |row| {
+                    .when(local_only && ops == RowOps::Conflict && is_git, |row| {
                         row.child(
                             Button::new(SharedString::from(format!(
                                 "git-resolve-{section_id}-{index}"
@@ -397,7 +418,15 @@ impl NebulaWorkspace {
                         cx.notify();
                     }))
                     .on_double_click(cx.listener(move |this, _, window, cx| {
-                        if ops == RowOps::Conflict && is_git {
+                        if let Some((destination, path)) = &remote_doc {
+                            // 只读形态（远端）：打开远端文档，不碰本地文件系统。
+                            this.open_remote_document(
+                                destination.clone(),
+                                path.clone(),
+                                window,
+                                cx,
+                            );
+                        } else if ops == RowOps::Conflict && is_git {
                             this.open_git_merge_tab(merge_open_path.clone(), window, cx);
                         } else if !svn_diff || !this.side_panel.svn_diff_path(&diff_path) {
                             // Git 与未版本化 SVN 文件仍走现有文档路由。

@@ -49,7 +49,12 @@ fn git_list_repaints_visible_rows_and_clicks_the_scrolled_path(cx: &mut TestAppC
             )
         });
         workspace.update(cx, |workspace, _| {
-            workspace.vcs_list.sync(Some(data.clone()), GitPanelView::Changes, Some(root.clone()));
+            workspace.vcs_list.sync(
+                Some(data.clone()),
+                GitPanelView::Changes,
+                Some(root.clone()),
+                false,
+            );
         });
         let view = cx.new(|_| ListProbe(workspace.clone()));
         owner = Some(workspace);
@@ -67,6 +72,7 @@ fn git_list_repaints_visible_rows_and_clicks_the_scrolled_path(cx: &mut TestAppC
                     Some(data.clone()),
                     GitPanelView::Changes,
                     Some(root.clone()),
+                    false,
                 );
             });
             probe.update(cx, |_, cx| cx.notify());
@@ -104,6 +110,7 @@ fn git_list_repaints_visible_rows_and_clicks_the_scrolled_path(cx: &mut TestAppC
                 Some(snapshot(5000)),
                 GitPanelView::Changes,
                 Some(root.clone()),
+                false,
             );
             assert_eq!(workspace.vcs_list.scroll.logical_scroll_top().item_ix, before.item_ix);
             workspace.vcs_list.rendered.clear();
@@ -152,7 +159,7 @@ fn grouping_keeps_conflict_and_stage_actions_attached_to_the_correct_paths() {
         ..GitInfo::default()
     });
     let mut list = VcsList::default();
-    list.sync(Some(data.clone()), GitPanelView::Changes, Some(PathBuf::from("/repo")));
+    list.sync(Some(data.clone()), GitPanelView::Changes, Some(PathBuf::from("/repo")), false);
     let paths: Vec<_> = (0..list.scroll.item_count())
         .filter_map(|ix| match list.row(ix).unwrap() {
             VcsRow::Change { relative_path, ops, .. } => Some((relative_path.as_str(), *ops)),
@@ -167,7 +174,7 @@ fn grouping_keeps_conflict_and_stage_actions_attached_to_the_correct_paths() {
                 ("modified.rs", RowOps::Unstaged)
             ]
     );
-    list.sync(Some(data), GitPanelView::Conflicts, Some(PathBuf::from("/repo")));
+    list.sync(Some(data), GitPanelView::Conflicts, Some(PathBuf::from("/repo")), false);
     assert_eq!(list.scroll.item_count(), 2);
     assert_eq!(list.scroll.logical_scroll_top().item_ix, 0);
 }

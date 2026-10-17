@@ -359,6 +359,7 @@ impl NebulaWorkspace {
             match self.side_panel.view {
                 PanelView::Files if remote => self.render_remote_files(cx),
                 PanelView::Files => self.render_file_tree(cx),
+                PanelView::Git if remote => self.render_remote_git(window, cx),
                 PanelView::Git => self.render_git_tree(window, cx),
             }
         };

@@ -167,7 +167,7 @@ Root: HKCU; Subkey: "Software\Classes\Directory\shell\Pebrel\command"; ValueType
 #endif
 
 [Run]
-Filename: "{app}\pebrel.exe"; Parameters: "{code:PebrelLaunchParameters}"; Description: "{cm:LaunchProgram}"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent; AfterInstall: RestorePebrelLaunchEnvironment
+Filename: "{app}\pebrel.exe"; Parameters: "--gpui"; Description: "{cm:LaunchProgram}"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent; AfterInstall: RestorePebrelLaunchEnvironment
 
 [UninstallRun]
 #ifndef AcceptanceFixture

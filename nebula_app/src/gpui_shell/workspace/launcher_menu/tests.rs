@@ -34,24 +34,10 @@ fn open(cx: &mut TestAppContext) -> (Entity<NebulaWorkspace>, VisualTestContext)
             )
         });
         view.update(cx, |workspace, cx| {
-            let mut hosts = crate::gpui_shell::ssh_hosts::SshHostLists::default();
-            hosts.profiles.upsert(hosts.profiles.for_destination("test-host"));
-            hosts
-                .profiles
-                .set_organization(
-                    "test-host",
-                    crate::ssh_profiles::HostOrganization::from_inputs(
-                        "生产",
-                        "Linux, Équipe",
-                        "Owner: Alice",
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
             workspace.palette_override = Some(shell_palette_rows(
                 vec![shell("cmd"), shell("pwsh")],
                 vec![],
-                &hosts,
+                [("test-host".into(), String::new())],
                 "cmd",
                 workspace_ui_language(),
                 1.0,

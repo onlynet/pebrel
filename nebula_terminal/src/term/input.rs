@@ -294,6 +294,50 @@ impl<T: EventListener> Term<T> {
         }
         self.damage.damage_point(Point::new(point.line.0 as usize, point.column + 1));
     }
+
+    /// Write `c` to the cell at the cursor position（2026-10-12 从 mod.rs 移入：
+    /// 写入路径与它的全部调用方同住 input.rs；`pub(super)` 供 term::tests
+    /// 直打的世代合同测试使用）。
+    #[inline(always)]
+    pub(super) fn write_at_cursor(&mut self, c: char) {
+        let c = self.grid.cursor.charsets[self.active_charset].map(c);
+        let fg = self.grid.cursor.template.fg;
+        let bg = self.grid.cursor.template.bg;
+        let flags = self.grid.cursor.template.flags;
+        let extra = self.grid.cursor.template.extra.clone();
+
+        let mut cursor_cell = self.grid.cursor_cell();
+
+        // Clear all related cells when overwriting a fullwidth cell.
+        if cursor_cell.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER) {
+            // Remove wide char and spacer.
+            let wide = cursor_cell.flags.contains(Flags::WIDE_CHAR);
+            let point = self.grid.cursor.point;
+            if wide && point.column < self.last_column() {
+                self.grid[point.line][point.column + 1].flags.remove(Flags::WIDE_CHAR_SPACER);
+            } else if point.column > 0 {
+                self.grid[point.line][point.column - 1].clear_wide();
+            }
+
+            // Remove leading spacers.
+            if point.column <= 1 && point.line != self.topmost_line() {
+                let column = self.last_column();
+                self.grid[point.line - 1i32][column].flags.remove(Flags::LEADING_WIDE_CHAR_SPACER);
+            }
+
+            cursor_cell = self.grid.cursor_cell();
+        }
+
+        cursor_cell.c = c;
+        cursor_cell.fg = fg;
+        cursor_cell.bg = bg;
+        cursor_cell.flags = flags;
+        cursor_cell.extra = extra;
+        // 普通可打印写入不标 damage（旧壳靠 damage() 读取时的光标兜底），
+        // 但它改了网格内容——渲染世代必须在此递增，快照缓存才不会把新
+        // 输出冻在旧帧（设计见 2026-10-12 渲染快照缓存 note）。
+        self.damage.bump_generation();
+    }
 }
 
 #[cfg(test)]
