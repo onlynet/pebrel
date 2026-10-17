@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 
-use super::sidebar::TABS_DISCLOSURE_SLOT_W;
+use super::sidebar_tree::TABS_DISCLOSURE_SLOT_W;
 use super::task_groups::{RecentSessionRow, SidebarRow};
 use super::*;
 use crate::i18n::Message;

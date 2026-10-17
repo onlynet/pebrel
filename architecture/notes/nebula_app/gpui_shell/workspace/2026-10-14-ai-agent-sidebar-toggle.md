@@ -2,7 +2,13 @@
 
 ## Status
 
-Decided 2026-10-14 while packaging the `feat/sidebar_tree` sidebar rewrite:
+Decided 2026-10-14 while packaging the `feat/sidebar_tree` sidebar rewrite.
+
+2026-10-17: the "Legacy isolation" decision below (verbatim
+`sidebar_legacy.rs` copy) was replaced by the upstream-identical
+`sidebar.rs` + `sidebar_tree.rs` split; see
+[`2026-10-17-sidebar-upstream-identical-split.md`](2026-10-17-sidebar-upstream-identical-split.md).
+All other decisions here stand.
 the grouped sidebar ships behind `ai_agent_sidebar` (default off) so the
 branch's visual rework is opt-in and `main`'s flat-list behavior remains
 reachable without a revert.

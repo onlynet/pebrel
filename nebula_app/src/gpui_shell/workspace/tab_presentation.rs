@@ -122,12 +122,13 @@ impl NebulaWorkspace {
             .unwrap_or((None, SidebarActivity::Idle));
         // 事件 vs 状态的唯一裁定处（侧栏与顶栏共用这份 presentation），语义
         // 跟随「AI Agent 侧边栏」开关：开 = 完成读作 Ready 状态（当前 tab
-        // 也画，见 [`sidebar::resting_activity`]）；关 = main 的经典语义
-        // （完成是事件，当前 tab 不画，[`sidebar_legacy::legacy_resting_activity`]）。
+        // 也画，见 [`sidebar_tree::tree_resting_activity`]）；关 = main 的
+        // 经典语义（完成是事件，当前 tab 不画，[`sidebar::resting_activity`]，
+        // 与上游逐字一致）。
         let activity = if crate::gpui_shell::config::ai_agent_sidebar(cx) {
-            sidebar::resting_activity(activity, active, self.meta(ix).has_bell)
+            sidebar_tree::tree_resting_activity(activity, active, self.meta(ix).has_bell)
         } else {
-            sidebar_legacy::legacy_resting_activity(activity, active, self.meta(ix).has_bell)
+            sidebar::resting_activity(activity, active, self.meta(ix).has_bell)
         };
         // agent 身份只 parse 一次：headline 与 `is_agent_session` 共用。
         let agent = program.as_deref().and_then(crate::ai_agents::AgentKind::parse);

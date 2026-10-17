@@ -1,66 +1,15 @@
-use super::task_groups::SidebarRow;
 use super::*;
 use crate::gpui_shell::widgets::toolbar_button;
 use crate::i18n::Message;
 
 /// 折叠箭头的固定布局槽。图标是 SVG，不应借任一字体的 advance 决定留白。
-/// 「最近任务」分区头复用同一槽宽，两条分区标题的箭头纵向对齐。
-pub(super) const TABS_DISCLOSURE_SLOT_W: f32 = 24.0;
+const TABS_DISCLOSURE_SLOT_W: f32 = 24.0;
 
 /// `SidebarActivity::WaitingInput` / `Attention` 共用的字位：Nerd Font
 /// `nf-fa-hand_paper_o`（开掌）。已核对打包字体
 /// `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` 的 cmap 覆盖这个码位；换字体
 /// 前先核，否则会掉成豆腐块。
 const WAITING_INPUT_GLYPH: &str = "\u{f256}";
-
-/// 活动徽章左侧的文字描述（参考图 Running/Ready 文案）。`Idle` 无文案——
-/// 那个槽位由 shell 短标占据。`Done`/`Completed` 同为「回合结束待下一条」
-/// 的两个阶段，共用一条文案。
-fn activity_status_label(
-    activity: SidebarActivity,
-    language: &crate::display::UiLanguage,
-) -> Option<&'static str> {
-    match activity {
-        SidebarActivity::Running => Some(language.text(Message::SidebarStatusRunning)),
-        SidebarActivity::Paused => Some(language.text(Message::SidebarStatusPaused)),
-        SidebarActivity::Done | SidebarActivity::Completed => {
-            Some(language.text(Message::SidebarStatusReady))
-        },
-        SidebarActivity::WaitingInput => Some(language.text(Message::SidebarStatusWaitingInput)),
-        SidebarActivity::Attention => Some(language.text(Message::SidebarStatusAsk)),
-        SidebarActivity::CommandFailed => Some(language.text(Message::SidebarStatusFailed)),
-        SidebarActivity::Failed => Some(language.text(Message::SidebarStatusStopped)),
-        SidebarActivity::Idle => None,
-    }
-}
-
-/// 文字与徽章共用同一语义色：形状（或动效）表达状态，颜色表达严重度，
-/// 文字把语义补全到不用猜的程度。
-fn activity_label_color(activity: SidebarActivity, theme: &gpui_component::Theme) -> gpui::Hsla {
-    match activity {
-        SidebarActivity::Running => theme.warning,
-        SidebarActivity::Paused => theme.warning,
-        SidebarActivity::Done => theme.primary,
-        SidebarActivity::Completed => theme.success,
-        SidebarActivity::CommandFailed => theme.danger,
-        SidebarActivity::WaitingInput => theme.primary,
-        SidebarActivity::Attention => theme.warning,
-        SidebarActivity::Failed => theme.danger,
-        SidebarActivity::Idle => theme.muted_foreground,
-    }
-}
-
-/// agent 侧栏模式下状态徽章只属于 AI 会话（用户 10-14 裁定）：普通终端
-/// 的常规状态回落 `Idle`（无点无文字，空闲短标照旧）；`Failed` 是 pane 级
-/// 故障（SSH 断连/进程没了），挂掉的连接必须看得见，保留例外。只被分组
-/// 条目行消费——顶栏走未过滤的 `TabPresentation::activity`，不受影响。
-fn agent_scoped_activity(activity: SidebarActivity, is_agent: bool) -> SidebarActivity {
-    if is_agent || activity == SidebarActivity::Failed {
-        activity
-    } else {
-        SidebarActivity::Idle
-    }
-}
 
 /// 侧栏新建入口的生产命中区；鼠标测试直接复用，避免只验证一个近似按钮。
 pub(super) fn sidebar_new_tab_control(
@@ -84,10 +33,10 @@ pub(super) fn sidebar_new_tab_control(
 
 /// 事件 vs 状态：一个 tab 此刻该显示哪个静息徽章。
 ///
-/// - `Done`/`Completed` 在状态标签体系下读作「回合结束、Ready 待命」——这是
-///   **状态**，当前 tab 也照画（用户 10-10 裁定：高亮行的 agent 状态不得回落
-///   成 shell 短标「pwsh」）。
-/// - 后台响铃补位到 `Done` 只对非当前 tab 成立。`has_bell` 本身激活即清
+/// - `Done` 是**事件**——「回合完成了，你不在场」。你正看着这个 tab 时它没有
+///   信息量了，还画一个点等于让用户去点掉自己刚亲眼看完的事，所以当前 tab
+///   一律降回 `Idle`。
+/// - 后台响铃补位到 `Done` 同理，只对非当前 tab 成立。`has_bell` 本身激活即清
 ///   （见 `TabMeta::has_bell`），这里再挡一次是因为清除发生在激活事件里，同一帧
 ///   内读到的可能还是旧值。
 /// - 其余都是**状态**（转圈、等输入、等授权、失败），描述「此刻仍然如此」，你看
@@ -99,6 +48,7 @@ pub(super) fn resting_activity(
     has_bell: bool,
 ) -> SidebarActivity {
     match activity {
+        SidebarActivity::Done | SidebarActivity::Completed if active => SidebarActivity::Idle,
         SidebarActivity::Idle if !active && has_bell => SidebarActivity::Done,
         other => other,
     }
@@ -237,21 +187,14 @@ impl NebulaWorkspace {
             .child(WAITING_INPUT_GLYPH)
     }
 
-    /// 侧栏渲染的唯一分派点：「AI Agent 侧边栏」开 = 分组新样式，关 =
-    /// 经典扁平列表（main 行为，含卷帘折叠与拖拽让位动画）。设置变更经
-    /// 全局 `Settings` 重建 + notify 到达，这里每帧读取即时生效。
-    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if crate::gpui_shell::config::ai_agent_sidebar(cx) {
-            self.render_sidebar_groups(window, cx).into_any_element()
-        } else {
-            self.render_sidebar_legacy(window, cx).into_any_element()
-        }
-    }
-
-    fn render_sidebar_groups(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let row_height = tab_scroll::tab_row_height(self.density);
         let row_pitch = self.tab_row_pitch();
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        // 数量 chip 数字：旧壳独用 ink_faint（比 ink_dim 再暗一档），chip 背
+        // 景 surface 洗色不变——数字不该和标题抢层级。
+        let faint = crate::gpui_shell::theme::faint_ink(cx);
         let active_bg = theme.sidebar_accent;
         let active_fg = theme.sidebar_accent_foreground;
         let hover_bg = theme.list_hover;
@@ -267,15 +210,6 @@ impl NebulaWorkspace {
         let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         // 界面字号独立于终端缩放。
         let label_px = settings.map(|settings| settings.ui_font_size_px).unwrap_or(15.0);
-        // 分组条目行高与副行带：行高由密度+界面字号派生（两行副行槽固定
-        // 预留，见 `task_groups::sidebar_entry_height` 的取舍说明）。
-        let metrics = self.row_metrics(cx);
-        let entry_h = task_groups::sidebar_entry_height(&metrics);
-        let subline_line_h = task_groups::subline_line_height(&metrics);
-        let subline_font_px = task_groups::subline_font_px(&metrics);
-        let subline_h = 2.0 * subline_line_h + 2.0;
-        let language = crate::gpui_shell::config::ui_language(cx);
-        let new_session = language.text(Message::SidebarNewSession);
 
         // 受约束拖拽的渲染参数：激活后被拖行骑指针位移，落点槽位由位移换算。
         let drag = self
@@ -285,66 +219,18 @@ impl NebulaWorkspace {
             .map(|d| (d.source, Self::drag_slot(d, self.tabs.len()), d.offset));
         let items_running = std::cell::Cell::new(false);
 
-        // 统一行模型（两个分区头 + 组头 + 条目）与变节距窗口：render 路径
-        // 只做内存推导。
-        let rows = self.sidebar_list_rows(cx);
-        let (heights, offsets) = self.rows_geometry(&rows, cx);
-        let row_window = self.rows_window(&rows, &heights);
-        let bar = self.tabs_overlay_bar(&heights, &offsets, &row_window);
-        // 目录树线：坐标相对可见窗口首行；视口未量到时按无限高画（首帧
-        // 全显，窗口化不会裁掉线段）。
-        let guides = task_groups::tree_guides(
-            &rows,
-            &offsets,
-            offsets.get(row_window.scroll).copied().unwrap_or(0.0),
-            if self.tabs_viewport_h >= 1.0 { self.tabs_viewport_h } else { f32::INFINITY },
-            &metrics,
-        );
+        // 折叠只裁剪槽位，不改窗口算法：旧壳 `tabs_avail` 与 `tabs_open`
+        // 分开——折起来时行矩形为零，但可用高度仍按面板剩余算。
+        let (tabs_scroll, tabs_show) = self.tabs_visible_window();
         // 行的确定宽度：侧栏宽 − 侧栏 p_2 两边 − 列表右侧滚动条留白。
         // 与下面 `label_avail` 同一份减法口径，两者不能各算一套。
         let row_w = (self.sidebar_width - 16.0 - tab_scroll::TAB_SCROLL_GUTTER).max(1.0);
-        let items = rows
-            .iter()
-            .enumerate()
-            .filter(|(row_ix, _)| {
-                task_groups::row_index_visible(*row_ix, row_window.scroll, row_window.show)
-            })
-            .map(|(row_ix, row)| match row {
-                SidebarRow::TabsSectionHeader { count, collapsed } => self
-                    .render_tabs_section_header(row_w, *count, *collapsed, cx)
-                    .into_any_element(),
-                SidebarRow::HostHeader { key, name, tabs, collapsed } => self
-                    .render_ssh_host_header(row_w, row_ix, key, name, *tabs, *collapsed, cx)
-                    .into_any_element(),
-                SidebarRow::GroupHeader { key, name, branch, tabs, collapsed } => self
-                    .render_group_header(row_w, row_ix, key, name, branch, *tabs, *collapsed, cx)
-                    .into_any_element(),
-                SidebarRow::RecentSectionHeader { count, collapsed } => self
-                    .render_recent_section_header(row_w, *count, *collapsed, cx)
-                    .into_any_element(),
-                SidebarRow::RecentGroupHeader { collapse_key, name, sessions, collapsed } => self
-                    .render_recent_group_header(
-                        row_w,
-                        row_ix,
-                        collapse_key,
-                        name,
-                        *sessions,
-                        *collapsed,
-                        cx,
-                    )
-                    .into_any_element(),
-                SidebarRow::RecentSession(session) => self
-                    .render_recent_session_row(row_ix, row_w, session, cx)
-                    .into_any_element(),
-                SidebarRow::RecentStatus { scanning } => self
-                    .render_recent_status_row(row_w, *scanning, cx)
-                    .into_any_element(),
-                SidebarRow::Tab { ix } => {
-                let ix = *ix;
+        let items = (0..self.tabs.len())
+            .filter(|&ix| tab_scroll::index_visible(ix, tabs_scroll, tabs_show))
+            .map(|ix| {
                 let active = ix == self.active;
                 let TabPresentation {
-                    title: _,
-                    headline,
+                    title,
                     tooltip,
                     is_settings,
                     activity,
@@ -356,38 +242,20 @@ impl NebulaWorkspace {
                     renaming,
                     pane_count,
                     local_administrator,
-                    is_agent_session,
+                    // 分支给 TabPresentation 增补的 headline/is_agent_session
+                    // 字段经典路径不消费，用 `..` 吸收，保持与上游可合并。
+                    ..
                 } = self.tab_presentation(ix, cx, dark);
                 let hover_group: SharedString = format!("sidebar-tab-hover-{ix}").into();
                 let has_program_glyph = program_glyph.is_some();
-                // 状态徽章只属于 AI 会话：普通终端的常规状态（转圈/完成/
-                // 等输入等）一律不画，只有 pane 级故障（SSH 断连/进程没了，
-                // ✕ Stopped）例外——挂掉的连接不能看不见。被滤成 `Idle` 的
-                // tab 状态槽自然回落 shell 短标。
-                let activity = agent_scoped_activity(activity, is_agent_session);
-                // 状态槽宽度：文字徽章按「文字 + 图标 + 间隔」预留（UI 文字
-                // 走 chrome sans）；无文字时仍按 shell 短标测量（路径类短标
-                // 走 metadata 等宽）。两套互斥，Idle 不画文字。
-                let status_label = activity_status_label(activity, &language);
-                let status_width = match status_label {
-                    Some(label) => Self::shell_status_width(
-                        window,
-                        Some(&SharedString::from(label)),
-                        &chrome_family,
-                        label_px * SIDEBAR_TAG_SCALE,
-                        TAB_STATUS_SLOT_W,
-                        row_w * 0.45,
-                    ) + TAB_LABEL_ICON_W + 4.0,
-                    None => Self::shell_status_width(
-                        window,
-                        shell_tag.as_ref(),
-                        &metadata_family,
-                        label_px * SIDEBAR_TAG_SCALE,
-                        TAB_STATUS_SLOT_W,
-                        row_w * 0.45,
-                    ),
-                }
-                .min(row_w * 0.45);
+                let status_width = Self::shell_status_width(
+                    window,
+                    shell_tag.as_ref(),
+                    &metadata_family,
+                    label_px * SIDEBAR_TAG_SCALE,
+                    TAB_STATUS_SLOT_W,
+                    row_w * 0.45,
+                );
                 let cross_window_drag = self.cross_window_drag_payload(ix, cx);
                 // 用户明确设置过的标签色：行左侧一条竖光条（上下各留 7、宽 2.5，
                 // 与旧壳 strip 同源）。默认标签不占这层视觉层级。
@@ -402,21 +270,6 @@ impl NebulaWorkspace {
                     b: color.b as f32 / 255.0,
                     a: 1.0,
                 });
-                // 副行「摘要 · 时刻」：任务标题与 tooltip 同一过滤
-                // （`task_summary`），普通 shell 无任务标题时回落「新会话」。
-                let (task_summary_row, spawned_at_row) = match self.tabs[ix].focused_view() {
-                    Some(view) => {
-                        let view = view.read(cx);
-                        (view.task_summary().map(str::to_owned), Some(view.spawned_at()))
-                    },
-                    None => (None, None),
-                };
-                let subline: SharedString = task_groups::task_subline_label(
-                    task_summary_row.as_deref(),
-                    spawned_at_row,
-                    new_session,
-                )
-                .into();
                 let status_color = if active { active_fg } else { muted };
                 let resting_status: Option<gpui::AnyElement> = match activity {
                     SidebarActivity::Running => {
@@ -485,7 +338,7 @@ impl NebulaWorkspace {
                 // 三类行位移（旧壳 tab_drag_draw_y 的语义）：被拖行骑指针，
                 // 源与落点之间的行向反方向让一个槽位，其余不动。存储顺序在
                 // 拖拽期间不变，释放时一次性提交。
-                let (dragged, _shift) = match drag {
+                let (dragged, shift) = match drag {
                     Some((src, _, _)) if ix == src => (true, 0.0),
                     Some((src, tgt, _)) if src < tgt && ix > src && ix <= tgt => {
                         (false, -row_pitch)
@@ -516,15 +369,8 @@ impl NebulaWorkspace {
                 // 撑开的行会重新引入上面那个症状。
                 .overflow_hidden()
                 .gap_2()
-                // 左侧让位给目录树肘形线（图标列从
-                // [`task_groups::tree_icon_left`] 起，SSH 主机下的条目同
-                // 档不缩进），右侧仍是 8px 旧壳内边距。
-                .pl(px(task_groups::tree_icon_left()))
-                .pr(px(8.0))
-                .h(px(entry_h))
-                // 底部留出副行带：第一行内容在剩余高度里垂直居中，副行走
-                // absolute 槽位（见行链上的 subline child）。
-                .pb(px(subline_h))
+                .px_2()
+                .h(px(row_height))
                 .items_center()
                 // 旧壳 pill 圆角 = UI_CORNER_RADIUS_LOGICAL(8)，rounded_md(6)
                 // 偏小一圈，选中水洗的轮廓形状会不一样。
@@ -541,12 +387,9 @@ impl NebulaWorkspace {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.activate_tab(ix, window, cx);
                 }))
-                // 分组视图不做组内拖拽重排（组由 cwd 派生，跨组拖拽没有落点
-                // 语义），但保留待命装填：gpui 的 click 合成链路依赖视图节点
-                // 在 bubble 阶段的 mouse_down listener（div.rs pending_mouse_
-                // down 的记录条件），去掉它条目 on_click 会整体失效——见
-                // `sidebar_groups` 布局测试的点击断言。拖拽永不激活（移动阈值
-                // 由 update_tab_drag 驱动，本视图不喂给它轴位移）。
+                // 受约束拖拽：按下待命（源下标 + 按点 Y），移动阈值与让位
+                // 由 update_tab_drag 驱动；激活后的指针独占见 render 根部
+                // 的透明罩层。
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -583,15 +426,13 @@ impl NebulaWorkspace {
                             .left_0()
                             .top(px(7.0))
                             .w(px(2.5))
-                            .h(px(entry_h - 14.0))
+                            .h(px(row_height - 14.0))
                             .rounded_full()
                             .bg(color),
                     )
                 })
-                // 权限属于整个会话，先于程序身份呈现；**agent 会话期让位**
-                // ——行首只留 agent 品牌图标（用户 10-10 裁定）。品牌存在 =
-                // `logo_image` 已就位或仍在 `logo_pending` 装载中。
-                .when(local_administrator && logo_image.is_none() && !logo_pending, |row| {
+                // 权限属于整个会话，先于程序身份呈现，且不被 AI 图标替换。
+                .when(local_administrator, |row| {
                     row.child(tab_presentation::administrator_badge(
                         format!("sidebar-admin-{ix}").into(),
                         cx,
@@ -677,9 +518,7 @@ impl NebulaWorkspace {
                         .text_size(px(label_px))
                         .font_weight(FontWeight::NORMAL)
                         .truncate()
-                        // Agent 会话期第一行显示品牌名（`headline`）；目录名
-                        // 身份仍由 `title` 供 tooltip/顶栏/runtime API。
-                        .child(headline)
+                        .child(title)
                         .into_any_element(),
                 })
                 .when(pane_count > 1, |row| {
@@ -709,21 +548,7 @@ impl NebulaWorkspace {
                                     .inset_0()
                                     .justify_end()
                                     .items_center()
-                                    .gap_1()
                                     .group_hover(hover_group.clone(), |item| item.invisible())
-                                    // 徽章左侧的同语义文字描述（Running/Ready…）。
-                                    .when_some(status_label, |row, label| {
-                                        row.child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .font_family(chrome_family.clone())
-                                                .text_size(px(label_px * SIDEBAR_TAG_SCALE))
-                                                .font_weight(FontWeight::NORMAL)
-                                                .text_color(activity_label_color(activity, theme))
-                                                .child(label),
-                                        )
-                                    })
                                     .child(status),
                             )
                         })
@@ -753,27 +578,6 @@ impl NebulaWorkspace {
                                     }),
                         ),
                 )
-                // 副行槽位：absolute 底带，不参与第一行 flex 排布（行相对
-                // 定位，宽从图标槽右侧起，避开状态徽章与关闭按钮所在尾带）。
-                // 自动换行、最多两行、末行省略——`line_clamp` + `text_ellipsis`
-                // + Definite 宽走 gpui 的 truncate_wrapped_line；不能用
-                // `.truncate()`（whitespace_nowrap 会关掉换行）。
-                .child(
-                    div()
-                        .absolute()
-                        // 与第一行任务名文字左缘对齐（见 tree_text_left）。
-                        .left(px(task_groups::tree_text_left()))
-                        .bottom(px(2.0))
-                        .w(px((row_w - task_groups::tree_text_left() - 52.0).max(40.0)))
-                        .h(px(2.0 * subline_line_h))
-                        .line_height(px(subline_line_h))
-                        .line_clamp(2)
-                        .text_ellipsis()
-                        .font_family(chrome_family.clone())
-                        .text_size(px(subline_font_px))
-                        .text_color(if active { active_fg } else { muted })
-                        .child(subline),
-                )
                 // 右键只记锚点：菜单由 workspace 根上唯一一份宿主画。挂
                 // `.context_menu()` 会让每个标签行都渲染同一个 PopupMenu，
                 // 阴影按标签数叠厚（见 `tab_menu.rs` 模块头）。
@@ -789,15 +593,36 @@ impl NebulaWorkspace {
                         NebulaWorkspace::cross_window_drag_preview(payload, cx)
                     })
                 });
-                row.into_any_element()
+                if dragged {
+                    // 骑指针 + 提到最上层画（deferred 只延后绘制、不动布局），
+                    // 阴影给"拿起来"的抬升感。
+                    gpui::deferred(
+                        row.top(px(drag.map(|(_, _, off)| off).unwrap_or(0.0))).shadow_md(),
+                    )
+                    .into_any_element()
+                } else if shift != 0.0 {
+                    // 让位滑动：进位方向 ease-out 滑入（旧壳是双向弹簧；回位
+                    // 这里先直落，违和再补逐帧插值）。设置「标签动画=立即」时
+                    // 直接落位（旧壳 TabRevealMotion::Instant 的 Snap 语义）。
+                    if tab_reveal == nebula_settings::TabRevealName::Instant {
+                        row.top(px(shift)).into_any_element()
+                    } else {
+                        row.with_animation(
+                            ("tab-make-way", ix),
+                            Animation::new(Duration::from_millis(120))
+                                .with_easing(ease_out_quint()),
+                            move |row, t| row.top(px(shift * t)),
+                        )
+                        .into_any_element()
+                    }
+                } else {
+                    row.into_any_element()
                 }
             })
             .collect::<Vec<_>>();
 
-        // 「最近任务」折叠时的底部分区头（滚动列表外，钉在侧栏底部）。
-        let recent_pinned = self.recent_sessions.is_collapsed().then(|| {
-            self.render_recent_section_header(row_w, self.recent_sessions.row_count(), true, cx)
-        });
+        let header_group: SharedString = "sidebar-tabs-header-hover".into();
+        let count: SharedString = self.tabs.len().to_string().into();
 
         let sidebar = v_flex()
             .w(px(self.sidebar_width))
@@ -816,10 +641,134 @@ impl NebulaWorkspace {
             .on_mouse_move(cx.listener(|this, event, window, cx| {
                 this.update_tab_drag(event, window, cx);
             }))
-            .child(self.wrap_tabs_scroll_list(items, guides, bar, cx))
-            // 「最近任务」折叠时不进滚动列表：分区头钉在滚动区底部
-            // （列表 flex_1 把它压到底）。
-            .when_some(recent_pinned, |sidebar, header| sidebar.child(header));
+            .child(
+                h_flex()
+                    .id("sidebar-tabs-toggle")
+                    .group(header_group.clone())
+                    .w_full()
+                    .h(px(row_height))
+                    .pb_1()
+                    // 旧壳标题文字从 panel_x + 16px 起；侧栏根已有 8px
+                    // padding，这里再补 8px，箭头不会贴住左边缘。
+                    .pl_2()
+                    .items_center()
+                    .cursor_pointer()
+                    // `ChromeHit::TabsSection` 命中整条 tabs_header。监听必须
+                    // 挂在标题行根节点，右侧空白区同样可以折叠，而不是只有
+                    // 箭头、标题和数量这一小段能点。
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_tabs_section(cx);
+                    }))
+                    .child(
+                        // 箭头、TABS 和计数仍作为一个排版段；折叠命中已经
+                        // 提升到外层整行。右侧 +/⋯ 自己停止冒泡。
+                        h_flex()
+                            .h_full()
+                            .items_center()
+                            .font_family(chrome_family.clone())
+                            .pr_1()
+                            .child(
+                                // 折叠三角用组件库线性 Chevron（lucide 细线），
+                                // 不再用 Nerd Font 实心字位——后者在侧栏标题
+                                // 上偏重、和右侧 +/⋯ 的 SVG 不一套语言。
+                                h_flex()
+                                    .w(px(TABS_DISCLOSURE_SLOT_W))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(if self.tabs_section_collapsed {
+                                            IconName::ChevronRight
+                                        } else {
+                                            IconName::ChevronDown
+                                        })
+                                        .xsmall()
+                                        .text_color(muted),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(muted)
+                                    .child("TABS"),
+                            )
+                            .child(
+                                // chip 尺寸贴旧壳公式：h = max(cell_h×0.82×1.18, 11)
+                                // ≈ 18-19px（不是 22），1 位数宽 max(adv+8, h×1.25)。
+                                // 数字 ink_faint。
+                                h_flex()
+                                    .ml_2()
+                                    .h(px((label_px * 1.22 * SIDEBAR_TITLE_SCALE * 1.18).max(11.0)))
+                                    .min_w(px(label_px * 0.62 + 8.0))
+                                    .px_2()
+                                    .justify_center()
+                                    .items_center()
+                                    .rounded_full()
+                                    .bg(theme.muted)
+                                    .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(faint)
+                                    .child(count),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(
+                                // 旧壳 `ChromeHit::NewTab`：直接开设置里的默认
+                                // shell，不经过选择器。三点才是 NewTabMenu。
+                                sidebar_new_tab_control(
+                                    header_group,
+                                    cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.add_terminal(window, cx);
+                                    }),
+                                )
+                                    .rounded_md()
+                                    .text_color(muted)
+                                    .hover(|button| button.bg(hover_bg).text_color(theme.foreground))
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            "新建终端 (Ctrl+Shift+T)",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .child(
+                                        Icon::new(IconName::Plus).with_size(px(SIDEBAR_HEADER_ICON)),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .id("sidebar-tabs-menu")
+                                    .w(px(SIDEBAR_MENU_W))
+                                    .h(px(SIDEBAR_PLUS_SIZE))
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(muted)
+                                    .hover(|button| button.bg(hover_bg).text_color(theme.foreground))
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new("新建终端 (Ctrl+K)")
+                                            .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_shell_palette(window, cx);
+                                    }))
+                                    .child(
+                                        Icon::new(IconName::EllipsisVertical)
+                                            .with_size(px(SIDEBAR_HEADER_ICON)),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(self.render_tabs_section(items, cx));
         self.spinner_visible.set(items_running.get());
         if items_running.get() {
             self.arm_activity_spinner_frame(window, cx);
@@ -827,171 +776,64 @@ impl NebulaWorkspace {
         sidebar
     }
 
-    /// 「当前任务」分区头行：折叠箭头 + 标题 + 计数 + 悬停 +/⋯ 动作钮。
-    /// 统一列表的首行；行宽显式像素（同条目行的教训，容器 overflow_hidden
-    /// 下 w_full 会回落 shrink-to-fit）。
-    fn render_tabs_section_header(
-        &self,
-        row_w: f32,
-        count: usize,
-        collapsed: bool,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let hover_bg = theme.list_hover;
-        let faint = crate::gpui_shell::theme::faint_ink(cx);
-        let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
-        let label_px = settings.map(|settings| settings.ui_font_size_px).unwrap_or(15.0);
-        let chrome_family = theme.mono_font_family.clone();
-        let language = crate::gpui_shell::config::ui_language(cx);
-        let header_group: SharedString = "sidebar-tabs-header-hover".into();
-        let count_text: SharedString = count.to_string().into();
-        let row_height = tab_scroll::tab_row_height(self.density);
-        h_flex()
-            .id("sidebar-tabs-toggle")
-            .debug_selector(|| "sidebar-tabs-toggle".to_owned())
-            .group(header_group.clone())
-            .w(px(row_w))
-            .h(px(row_height))
-            .pb_1()
-            // 旧壳标题文字从 panel_x + 16px 起；箭头槽自带缩进，这里再补
-            // 8px，箭头不会贴住左边缘。
-            .pl_2()
-            .items_center()
-            .cursor_pointer()
-            .flex_shrink_0()
-            // 命中整条分区头：右侧空白区同样可以折叠，而不是只有箭头、
-            // 标题和数量这一小段能点。右侧 +/⋯ 自己停止冒泡。
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.toggle_tabs_section(cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |_, _: &MouseDownEvent, _, _| {}),
-            )
-            .child(
-                // 箭头、标题和计数仍作为一个排版段。
-                h_flex()
-                    .h_full()
-                    .items_center()
-                    .font_family(chrome_family.clone())
-                    .pr_1()
-                    .child(
-                        // 折叠三角用组件库线性 Chevron（lucide 细线），和右侧
-                        // +/⋯ 的 SVG 同一套语言。
-                        h_flex()
-                            .w(px(TABS_DISCLOSURE_SLOT_W))
-                            .h_full()
-                            .flex_shrink_0()
-                            .items_center()
-                            .child(
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .xsmall()
-                                .text_color(muted),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(muted)
-                            .child(language.text(Message::SidebarCurrentTasks)),
-                    )
-                    .child(
-                        // chip 尺寸贴旧壳公式：h = max(cell_h×0.82×1.18, 11)
-                        // ≈ 18-19px（不是 22），1 位数宽 max(adv+8, h×1.25)。
-                        // 数字 ink_faint。
-                        h_flex()
-                            .ml_2()
-                            .h(px((label_px * 1.22 * SIDEBAR_TITLE_SCALE * 1.18).max(11.0)))
-                            .min_w(px(label_px * 0.62 + 8.0))
-                            .px_2()
-                            .justify_center()
-                            .items_center()
-                            .rounded_full()
-                            .bg(theme.muted)
-                            .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(faint)
-                            .child(count_text),
-                    ),
-            )
-            // 数量徽标右侧的水平 hairline：填满标题行剩余宽度（悬停动作钮
-            // 出现时线在钮前收尾）。
-            .child(
-                div()
-                    .debug_selector(|| "sidebar-tabs-hairline".to_owned())
-                    .flex_1()
-                    .ml_2()
-                    .h(px(1.0))
-                    .bg(crate::gpui_shell::theme::card_divider_color(cx)),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(
-                        // 直接开设置里的默认 shell，不经过选择器；三点才是
-                        // NewTabMenu。
-                        sidebar_new_tab_control(
-                            header_group,
-                            cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.add_terminal(window, cx);
-                            }),
-                        )
-                        .rounded_md()
-                        .text_color(muted)
-                        .hover(|button| button.bg(hover_bg).text_color(theme.foreground))
-                        .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new("新建终端 (Ctrl+Shift+T)")
-                                .build(window, cx)
-                        })
-                        .child(Icon::new(IconName::Plus).with_size(px(SIDEBAR_HEADER_ICON))),
-                    )
-                    .child(
-                        h_flex()
-                            .id("sidebar-tabs-menu")
-                            .w(px(SIDEBAR_MENU_W))
-                            .h(px(SIDEBAR_PLUS_SIZE))
-                            .flex_shrink_0()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_color(muted)
-                            .hover(|button| button.bg(hover_bg).text_color(theme.foreground))
-                            .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new("新建终端 (Ctrl+K)")
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_shell_palette(window, cx);
-                            }))
-                            .child(
-                                Icon::new(IconName::EllipsisVertical)
-                                    .with_size(px(SIDEBAR_HEADER_ICON)),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
     /// 与旧壳 `nebula_tabs_section_open` 同义：点标题整行折叠/展开。
-    /// 折叠即时生效（与项目组折叠一致）——行数变化后就地钳制滚动窗口。
+    /// 卷帘只裁剪槽位，视口高度在动画期间冻结，避免量到裁剪高后把溢出
+    /// 列表锁成一行滚动区。
     fn toggle_tabs_section(&mut self, cx: &mut Context<Self>) {
         self.tabs_section_collapsed = !self.tabs_section_collapsed;
-        // 行移位，菜单锚定的那一行不在原处了。
+        // 卷帘一动，菜单锚定的那一行就不在原处了。
         self.tab_menu = None;
-        self.clamp_rows_after_group_toggle(cx);
+        self.tabs_fold_armed = true;
+        self.tabs_fold_seq = self.tabs_fold_seq.wrapping_add(1).max(1);
+        let seq = self.tabs_fold_seq;
+        self.tabs_fold_frozen = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tabs_fold_seq == seq {
+                    this.tabs_fold_frozen = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// Tab 列表槽位。展开时列表是侧栏 `v_flex` 的 `flex_1` 子项，视口等于
+    /// 面板剩余高度（旧壳 `tabs_avail`）。折叠动画只按**上次量到的剩余
+    /// 高度**卷帘，绝不按全部行高，也不把裁剪高度写回窗口。
+    fn render_tabs_section<I>(&self, items: I, cx: &mut Context<Self>) -> gpui::AnyElement
+    where
+        I: IntoIterator,
+        I::Item: IntoElement,
+    {
+        let collapsed = self.tabs_section_collapsed;
+        let list =
+            self.wrap_tabs_scroll_list(items.into_iter().map(|item| item.into_any_element()), cx);
+        if collapsed && !self.tabs_fold_frozen {
+            return div().into_any_element();
+        }
+        if !self.tabs_fold_armed || !self.tabs_fold_frozen {
+            return if collapsed { div().into_any_element() } else { list };
+        }
+        let slot_h = self.tabs_viewport_h;
+        let (from, to) = if collapsed { (slot_h, 0.0) } else { (0.0, slot_h) };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .child(list)
+            .with_animation(
+                ("tabs-fold", collapsed as usize),
+                Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+                move |slot, t| {
+                    let height = from + (to - from) * t;
+                    if !collapsed && t >= 1.0 { slot } else { slot.max_h(px(height)) }
+                },
+            )
+            .into_any_element()
     }
 
     /// 侧栏槽位：宽度在 0..持久化宽度间以 ease-out 滑动，近似旧壳
@@ -1008,7 +850,7 @@ impl NebulaWorkspace {
             return if collapsed {
                 div().into_any_element()
             } else {
-                self.render_sidebar(window, cx).into_any_element()
+                self.render_sidebar_dispatch(window, cx)
             };
         }
         let width = self.sidebar_closing_width.unwrap_or(self.sidebar_width);
@@ -1017,7 +859,7 @@ impl NebulaWorkspace {
             .h_full()
             .flex_shrink_0()
             .overflow_hidden()
-            .child(self.render_sidebar(window, cx))
+            .child(self.render_sidebar_dispatch(window, cx))
             .with_animation(
                 ("sidebar-fold", collapsed as usize),
                 Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
@@ -1295,10 +1137,10 @@ mod tests {
     }
 
     #[test]
-    fn finished_states_stay_on_the_active_tab_as_ready() {
-        // 状态标签体系下 Done/Completed 读作「回合结束、Ready 待命」——高亮
-        // 行也照画，不得回落成 shell 短标（用户 10-10 报：Ready 被 pwsh 盖掉）。
-        assert_eq!(resting_activity(SidebarActivity::Done, true, false), SidebarActivity::Done);
+    fn finished_dot_is_an_event_so_the_tab_you_are_watching_never_shows_it() {
+        // 你正盯着 agent 跑完：那个点在你眼前亮起没有任何信息量。
+        assert_eq!(resting_activity(SidebarActivity::Done, true, false), SidebarActivity::Idle);
+        // 后台跑完才留痕。
         assert_eq!(resting_activity(SidebarActivity::Done, false, false), SidebarActivity::Done);
     }
 
@@ -1320,13 +1162,13 @@ mod tests {
         }
     }
 
-    /// 对勾是「完成」的第一阶段，与圆点同语义；命令失败不是事件——看一眼
-    /// 不等于处理完了，所以它留在当前 tab 上。
+    /// 对勾是「完成」的第一阶段，跟圆点同属事件：当前 tab 一律不画。命令失败
+    /// 不是事件——看一眼不等于处理完了，所以它留在当前 tab 上。
     #[test]
-    fn completion_flash_follows_the_same_rule_as_the_dot() {
+    fn completion_flash_follows_the_same_unattended_rule_as_the_dot() {
         assert_eq!(
             resting_activity(SidebarActivity::Completed, true, false),
-            SidebarActivity::Completed
+            SidebarActivity::Idle
         );
         assert_eq!(
             resting_activity(SidebarActivity::Completed, false, false),
@@ -1344,31 +1186,23 @@ mod tests {
         assert_eq!(resting_activity(SidebarActivity::Idle, true, true), SidebarActivity::Idle);
         assert_eq!(resting_activity(SidebarActivity::Idle, false, false), SidebarActivity::Idle);
     }
+}
 
-    #[test]
-    fn agent_scoped_activity_hides_plain_terminal_states_but_keeps_failures() {
-        // 普通终端的常规状态一律回落 Idle（无点无文字，空闲短标照旧）。
-        for state in [
-            SidebarActivity::Running,
-            SidebarActivity::Paused,
-            SidebarActivity::Done,
-            SidebarActivity::Completed,
-            SidebarActivity::CommandFailed,
-            SidebarActivity::WaitingInput,
-            SidebarActivity::Attention,
-        ] {
-            assert_eq!(agent_scoped_activity(state, false), SidebarActivity::Idle, "{state:?}");
-        }
-        // pane 级故障例外：挂掉的连接必须看得见。
-        assert_eq!(agent_scoped_activity(SidebarActivity::Failed, false), SidebarActivity::Failed);
-        // AI 会话状态原样。
-        for state in [
-            SidebarActivity::Running,
-            SidebarActivity::Done,
-            SidebarActivity::Failed,
-            SidebarActivity::Idle,
-        ] {
-            assert_eq!(agent_scoped_activity(state, true), state, "{state:?}");
+/// `ai_agent_sidebar` 运行时开关的分派点（分支自有，上游无此块）：开 =
+/// `sidebar_tree` 的分组树；关 = 上面的经典扁平列表。内部两处调用点
+/// （`render_sidebar_slot` 的两条路径）改走本分派，使折叠槽位/卷帘动画
+/// 在两种模式下都拿到正确的列表。这是 sidebar.rs 与上游仅有的差异
+/// （本块 + 那两行调用），上游合并时冲突面缩到个位数行。
+impl NebulaWorkspace {
+    fn render_sidebar_dispatch(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if crate::gpui_shell::config::ai_agent_sidebar(cx) {
+            self.render_sidebar_tree(window, cx).into_any_element()
+        } else {
+            self.render_sidebar(window, cx).into_any_element()
         }
     }
 }

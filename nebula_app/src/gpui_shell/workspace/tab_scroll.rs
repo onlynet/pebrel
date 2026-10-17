@@ -380,7 +380,7 @@ impl NebulaWorkspace {
     /// 可见窗口首行）的树线矩形，垫在行底之下先画。thumb 维持「悬停/拖拽
     /// 才显示」；不溢出时 `tabs_overlay_bar` 直接给 `None`，一屏可展示就
     /// 永远没有滚动条。
-    pub(super) fn wrap_tabs_scroll_list(
+    pub(super) fn wrap_rows_scroll_list(
         &self,
         items: impl IntoIterator<Item = gpui::AnyElement>,
         guides: Vec<task_groups::TreeGuide>,
@@ -540,7 +540,7 @@ impl NebulaWorkspace {
 
     /// 经典列表槽（main 版）：恒定右沟槽 + 覆盖 thumb + 滚轮，无树线、无
     /// 最近任务门控。`items` 已是可见窗口。
-    pub(super) fn legacy_wrap_tabs_scroll_list(
+    pub(super) fn wrap_tabs_scroll_list(
         &self,
         items: impl IntoIterator<Item = gpui::AnyElement>,
         cx: &mut Context<Self>,
@@ -645,7 +645,7 @@ impl NebulaWorkspace {
         // 折叠中/已折叠：裁剪高度不是 `tabs_avail`。写回去会让
         // `visible_count` 按 20–40px 算出 0/1 行，展开后整列锁死。
         if !self.tabs_section_collapsed
-            && !self.tabs_fold.frozen
+            && !self.tabs_fold_frozen
             && h >= tab_row_height(self.density)
         {
             self.tabs_viewport_h = h;

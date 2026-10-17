@@ -642,12 +642,13 @@ fn ai_agent_sidebar_toggle_switches_renderers(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("sidebar-tab-0").is_some(), "classic rows render");
     assert!(cx.debug_bounds("sidebar-tabs-hairline").is_none(), "no grouped section hairline");
     assert!(cx.debug_bounds("sidebar-group-name-workspace").is_none(), "no group header");
-    // 组头 on_click 在测试环境有已知命中问题（见上方滚轮测试的注释），
-    // 折叠状态机直接走方法；250ms 冻结定时器挂在虚拟时钟上不会自动到期，
-    // 手动放行（等价于卷帘动画结束后 frozen 清位的落点）。
+    // 组头 on_click 在测试环境有已知命中问题（见上方滚轮测试的注释）。
+    // 上游 `toggle_tabs_section` 是 sidebar 模块私有，这里直接复刻其状态
+    // 翻转（`tab_menu` 清位与冻结定时器对断言无影响——250ms 定时器挂在
+    // 虚拟时钟上本就不会自动到期，不置 frozen 即等价于动画结束后的落点）。
     workspace.update(&mut cx, |workspace, cx| {
-        workspace.legacy_toggle_tabs_section(cx);
-        workspace.tabs_fold.frozen = false;
+        workspace.tabs_section_collapsed = !workspace.tabs_section_collapsed;
+        workspace.tabs_fold_armed = true;
         cx.notify();
     });
     redraw(&mut cx);

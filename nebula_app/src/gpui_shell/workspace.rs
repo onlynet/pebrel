@@ -86,7 +86,7 @@ mod terminal_activity;
 use shell_picker::shell_palette_rows;
 mod settings_navigation;
 mod sidebar;
-mod sidebar_legacy;
+mod sidebar_tree;
 mod ssh_dialog;
 mod tab_drag;
 mod tab_duplication;
@@ -633,8 +633,13 @@ pub struct NebulaWorkspace {
     tabs_scroll: usize,
     /// 揭示意图：事件路径只置位，render 侧行模型换算窗口（`rows_window`）。
     tabs_scroll_pending_reveal: bool,
-    /// 经典侧栏的 TABS 卷帘折叠动画状态，仅 legacy 路径读写（见模块注释）。
-    tabs_fold: sidebar_legacy::TabsFold,
+    /// 经典侧栏的 TABS 卷帘折叠动画状态（与上游同名字段，`sidebar.rs`
+    /// 经典路径读写；分组树路径的折叠状态在 `sidebar_group_collapsed`）。
+    tabs_fold_armed: bool,
+    /// 折叠/展开动画期间冻结视口高度：旧壳 `tabs_avail` 来自面板剩余高度，
+    /// 绝不把卷帘裁剪量回去再算窗口，否则溢出列表会被锁成一行滚动区。
+    tabs_fold_frozen: bool,
+    tabs_fold_seq: u64,
     /// 列表视口（逻辑 px），由 canvas 回写；0 表示尚未量到。
     tabs_viewport_h: f32,
     tabs_list_width: f32,
@@ -914,7 +919,9 @@ impl NebulaWorkspace {
             sidebar_fold_armed: false,
             tabs_scroll: 0,
             tabs_scroll_pending_reveal: false,
-            tabs_fold: Default::default(),
+            tabs_fold_armed: false,
+            tabs_fold_frozen: false,
+            tabs_fold_seq: 0,
             tabs_viewport_h: 0.0,
             tabs_list_width: 0.0,
             tabs_list_origin: gpui::point(px(0.0), px(0.0)),
