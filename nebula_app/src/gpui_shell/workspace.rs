@@ -67,6 +67,7 @@ mod quick_jump;
 mod quick_terminal;
 mod recipes;
 mod remote_files;
+mod remote_git;
 mod rename;
 #[cfg(test)]
 use rename::apply_cancel_rename;
@@ -739,6 +740,8 @@ pub struct NebulaWorkspace {
     /// 远端列表的滚动位置。与本地树各用一个 handle：共用会让切换 pane 时
     /// 滚动条停在上一个列表的位置上，看起来像是列表内容对不上。
     remote_files_scroll: gpui::UniformListScrollHandle,
+    /// 抽屉 Git 视图在 SSH pane 上的只读形态（见 `remote_git.rs`）。
+    remote_git: remote_git::RemoteGit,
     /// 标签右键：同样画在根上。挂进标签行会让每一行都渲染同一份菜单，
     /// popover 阴影按标签数叠厚。见 `tab_menu.rs` 模块头。
     tab_menu: Option<tab_menu::TabContextMenu>,
@@ -967,6 +970,7 @@ impl NebulaWorkspace {
             file_tree_path: None,
             remote_browser: remote_files::RemoteBrowser::default(),
             remote_files_scroll: gpui::UniformListScrollHandle::new(),
+            remote_git: remote_git::RemoteGit::default(),
             tab_menu: None,
             selection_context_menu: None,
             sidebar_logo_images: HashMap::new(),
@@ -1508,7 +1512,7 @@ impl NebulaWorkspace {
                         *broadcast = false;
                     }
                 }
-                self.remote_browser.forget(pane_id);
+                self.forget_remote_state(pane_id);
                 self.pane_bounds.borrow_mut().remove(&pane_id);
                 self.mark_structural_resize(tab_ix, cx);
                 if tab_ix == self.active {
@@ -1643,12 +1647,12 @@ impl NebulaWorkspace {
         self.clear_reader_focus(cx);
         let Some((tab, _meta)) = self.remove_tab_at(ix) else { return };
         if let WorkspaceTab::Terminal { panes, .. } = &tab {
-            let mut bounds = self.pane_bounds.borrow_mut();
             for pane in panes {
                 self.runtime_hub.record_pane_closed(self.runtime_window_id, pane.id);
                 pane.view.read(cx).shutdown();
-                self.remote_browser.forget(pane.id);
-                bounds.remove(&pane.id);
+                self.forget_remote_state(pane.id);
+                // 短借：整借 `&mut self` 的清理调用不能横跨 RefCell 守卫。
+                self.pane_bounds.borrow_mut().remove(&pane.id);
             }
         }
 
@@ -1782,24 +1786,6 @@ impl NebulaWorkspace {
 
     /// 让窗口级共享文件树立即绑定当前 active tab / focused pane。切 pane/tab
     /// 时清掉树内手动浏览根；普通 OSC 7 轮询只在 cwd 真变化时由模型自动清掉。
-    fn sync_side_panel_to_active(
-        &mut self,
-        reset_browse_root: bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self.side_panel.open {
-            return false;
-        }
-        // SSH cwd reports drive SFTP browsing; remote paths must stay out of the
-        // local filesystem model. Bind first so pane switches use the new owner.
-        let remote_changed = self.sync_remote_browser_to_active(cx);
-        if self.remote_browser.active() {
-            return remote_changed;
-        }
-        let (cwd, wsl) = self.side_panel_follow(cx);
-        let cleared = reset_browse_root && self.side_panel.clear_custom_root();
-        self.side_panel.sync_at(cwd, wsl) || cleared || remote_changed
-    }
 
     fn toggle_file_tree(&mut self, cx: &mut Context<Self>) {
         if self.active_document_section(cx).is_some() {

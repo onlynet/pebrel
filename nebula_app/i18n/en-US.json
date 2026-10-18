@@ -818,6 +818,7 @@
     "pull": "Pull",
     "push": "Push",
     "push_ahead": "Push ↑{count}",
+    "remote_runs_over_ssh": "Remote repository · actions run over SSH",
     "follow_directory": "Follow terminal directory",
     "not_repository": "The current directory is not in a Git/SVN repository",
     "refresh_status": "Refresh {vcs} status",

@@ -3,7 +3,10 @@ use super::list_model::{RowOps, VcsRow};
 use super::*;
 
 impl NebulaWorkspace {
-    pub(super) fn render_vcs_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(in crate::gpui_shell::workspace) fn render_vcs_list(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let scroll = self.vcs_list.scroll.clone();
         let owner = cx.entity().downgrade();
         v_flex()

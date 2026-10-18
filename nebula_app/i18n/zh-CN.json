@@ -818,6 +818,7 @@
     "pull": "拉取",
     "push": "推送",
     "push_ahead": "推送 ↑{count}",
+    "remote_runs_over_ssh": "远端仓库 · 操作经 SSH 在远端执行",
     "follow_directory": "回到终端当前目录",
     "not_repository": "当前目录不在 Git/SVN 仓库中",
     "refresh_status": "刷新 {vcs} 状态",

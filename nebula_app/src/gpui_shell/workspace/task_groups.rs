@@ -678,7 +678,11 @@ impl NebulaWorkspace {
         };
         let view = view.read(cx);
         if let Some(destination) = view.ssh_destination.as_deref() {
-            return super::task_groups_ssh::ssh_group_info(destination, &view, None);
+            return super::task_groups_ssh::ssh_group_info(
+                destination,
+                &view,
+                self.remote_git.project(view.pane_id),
+            );
         }
         let cwd = view.cwd.as_str();
         if !groupable_cwd(cwd) {

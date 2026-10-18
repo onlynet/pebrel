@@ -35,6 +35,7 @@ pub(crate) mod global_shortcut;
 pub(crate) mod keyboard;
 pub(crate) mod local_paths;
 pub mod notifications;
+pub(crate) mod pane_cwd;
 pub(crate) mod pi_session;
 pub(crate) mod process;
 pub(crate) mod process_output;

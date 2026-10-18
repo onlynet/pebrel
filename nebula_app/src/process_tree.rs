@@ -73,7 +73,7 @@ pub fn is_interactive_shell_command(command: &str) -> bool {
 }
 
 /// 一个可执行文件路径的基名（去掉目录与 `.exe`）是否在交互式 shell 表里。
-fn is_shell_executable(path: &str) -> bool {
+pub(crate) fn is_shell_executable(path: &str) -> bool {
     let name = path.trim_matches(['"', '\'']).rsplit(['/', '\\']).next().unwrap_or(path);
     let name = name.to_ascii_lowercase();
     let stem = name.strip_suffix(".exe").unwrap_or(name.as_str());
