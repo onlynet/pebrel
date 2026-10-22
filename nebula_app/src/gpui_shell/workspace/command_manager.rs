@@ -387,12 +387,19 @@ impl NebulaWorkspace {
             let footer = DialogFooter::new()
                 .child(div().flex_1())
                 .child(
-                    DialogClose::new()
-                        .child(Button::new("saved-command-cancel").label(cancel_label)),
+                    DialogClose::new().child(
+                        Button::new("saved-command-cancel")
+                            .debug_selector(|| "saved-command-cancel".into())
+                            .label(cancel_label),
+                    ),
                 )
                 .child(
-                    DialogAction::new()
-                        .child(Button::new("saved-command-save").label(save_label).primary()),
+                    DialogAction::new().child(
+                        Button::new("saved-command-save")
+                            .debug_selector(|| "saved-command-save".into())
+                            .label(save_label)
+                            .primary(),
+                    ),
                 );
 
             center_modal_dialog(dialog, window, EDITOR_DIALOG_HEIGHT)

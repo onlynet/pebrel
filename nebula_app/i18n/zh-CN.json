@@ -39,6 +39,7 @@
     "recent_tasks": "最近任务",
     "group_workspace": "工作区",
     "ssh_host": "SSH [{host}]",
+    "ssh_section": "SSH 主机",
     "new_session": "新会话",
     "collapse_group": "折叠分组",
     "expand_group": "展开分组",

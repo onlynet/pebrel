@@ -1,6 +1,10 @@
 # SSH 主机两级分组（侧栏统一行模型）
 
 - Status: Accepted
+- Superseded by: Decision 2（打点键空间）与 Decision 4（首开序混排排序）
+  的排序部分由
+  [`2026-10-19-sidebar-local-ssh-split-and-first-seen-order.md`](2026-10-19-sidebar-local-ssh-split-and-first-seen-order.md)
+  取代（本地/SSH 分区 + 首见序，打点退役）；其余决策继续有效。
 - Context: 侧栏「当前任务」此前把 SSH pane 按目的地串拍成**扁平**一级组
   （`tab_group_info` 直接 `key = ssh_destination`），同一主机上不同项目的任务
   混在一个组里，也没有「主机」这一层身份；本地 pane 的项目/目录分组

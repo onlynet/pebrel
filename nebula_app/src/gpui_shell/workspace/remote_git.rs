@@ -86,6 +86,10 @@ pub(super) struct RemoteGit {
     generation: u64,
     /// 已发出的在途 root，跟随去重用。
     requested_root: Option<String>,
+    /// 点击沿（开抽屉/切到 Git 视图）请求的强制刷新，由
+    /// [`NebulaWorkspace::route_remote_git`] 消费（与本地 `needs_refresh`
+    /// 同构：事件只置位，路由统一发命令）。
+    pub(super) refresh_requested: bool,
     /// 每个 SSH pane 的项目身份探测缓存（侧栏分组对所有 SSH pane 可见，
     /// 不随抽屉聚焦切换——只在 pane 关闭时清）。
     projects: HashMap<u64, RemoteProject>,
@@ -129,7 +133,16 @@ impl RemoteGit {
         self.op_running = false;
         self.error = None;
         self.requested_root = None;
+        // pane/destination 变化路径本就触发 root 重拉，待处理请求无残留必要。
+        self.refresh_requested = false;
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// 点击沿（开抽屉/切到 Git 视图）请求一次强制刷新：幂等置位，由
+    /// `route_remote_git` 在空闲（无在途拉取/写操作）时消费。在途期间置位
+    /// 不丢失——落地后下一帧补拉，恰好覆盖「在途时 agent 又改了文件」。
+    pub(super) fn request_refresh(&mut self) {
+        self.refresh_requested = true;
     }
 
     /// 变更行双击的远端文档目标。root 以字符串形态保真拼接——`PathBuf`
@@ -241,9 +254,10 @@ impl NebulaWorkspace {
         (!root.is_empty()).then(|| root.to_owned())
     }
 
-    /// 远端 Git 视图的每帧路由：聚焦身份变化重置，仓库根变化重拉。render
-    /// 路径发请求的先例是 `attach_remote_browser`——纯内存比对通过后才动
-    /// 网络，不会每帧重发。
+    /// 远端 Git 视图的每帧路由：聚焦身份变化重置，仓库根变化重拉，点击沿
+    /// （开抽屉/切到 Git 视图，`refresh_requested`）强制重拉。render 路径发
+    /// 请求的先例是 `attach_remote_browser`——纯内存比对通过后才动网络，
+    /// 不会每帧重发。
     fn route_remote_git(&mut self, cx: &mut Context<'_, Self>) {
         let Some((pane, destination, cwd)) = self.focused_remote_pane(cx) else {
             if self.remote_git.pane.is_some() {
@@ -272,10 +286,35 @@ impl NebulaWorkspace {
             }
             return;
         };
-        if self.remote_git.root != root && self.remote_git.requested_root.as_deref() != Some(root.as_str())
+        if self.remote_git.root != root
+            && self.remote_git.requested_root.as_deref() != Some(root.as_str())
         {
             self.remote_git.root = root.clone();
+            // root 变化的重拉已覆盖本次点击请求，不吃掉也不叠加第二条命令。
+            self.remote_git.refresh_requested = false;
             self.refresh_remote_git(pane, destination, root, cx);
+        } else if self.remote_git.refresh_requested
+            && !self.remote_git.loading
+            && !self.remote_git.op_running
+        {
+            // 点击沿的强制刷新（开抽屉/切到 Git 视图）：root 未变也要重拉
+            // ——同一 cwd 下 agent 改文件不会动 root，旧快照会一直显示到
+            // 切 pane（用户 10-19 报障）。等待在途拉取/写操作收尾后再发。
+            self.remote_git.refresh_requested = false;
+            self.refresh_remote_git(pane, destination, root, cx);
+        }
+    }
+
+    /// 抽屉打开且停在 Git 视图时，请求一次远端 Git 面板的强制刷新（用户
+    /// 10-19 报障：agent 在同一 cwd 下改文件不动 root，`route_remote_git`
+    /// 的 root 变化判据失灵，旧快照一直显示到切 pane）。与本地
+    /// `SidePanel::toggle` 置 `needs_refresh` 同构：事件路径只置位，由
+    /// `route_remote_git` 统一消费（空闲时发命令，在途时等待）。
+    pub(super) fn wake_remote_git_refresh(&mut self) {
+        if self.side_panel.open
+            && self.side_panel.view == crate::display::side_panel::PanelView::Git
+        {
+            self.remote_git.request_refresh();
         }
     }
 
@@ -757,6 +796,19 @@ mod tests {
             branch: branch.to_owned(),
             cwd: cwd.to_owned(),
         }
+    }
+
+    /// 点击沿刷新标志的生命周期：置位幂等，`reset` 清位（pane/destination
+    /// 变化路径的 root 重拉已覆盖请求，无残留必要）。
+    #[test]
+    fn refresh_request_is_idempotent_and_reset_clears_it() {
+        let mut remote_git = RemoteGit::default();
+        assert!(!remote_git.refresh_requested);
+        remote_git.request_refresh();
+        remote_git.request_refresh();
+        assert!(remote_git.refresh_requested);
+        remote_git.reset();
+        assert!(!remote_git.refresh_requested);
     }
 
     /// 根决策的三级回落：上报的仓库根优先（且必须是绝对路径、仍覆盖 cwd），

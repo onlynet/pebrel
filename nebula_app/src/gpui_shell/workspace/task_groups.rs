@@ -4,8 +4,10 @@
 //!
 //! TABS 分组由 pane 的 cwd 派生：同一 git 仓库（或同一 cwd）的 tab 归一组，
 //! 组头带项目名、分支 chip 与折叠箭头。组不是用户数据，**不参与 tab 顺序**；
-//! 组间按**项目首开序**排列（见 [`NebulaWorkspace::note_project_group_open`]），
-//! 点击切换任务不改任何排序输入。git 仓库根的探测只发生在事件路径（见
+//! 「当前任务」内部分两段：本地组在上、SSH 主机在下（用户 10-19 裁定，段间
+//! 分隔行 + 「SSH 主机」子分区头），段内按**首见序**（组首次出现 ≈ 每个项目
+//! 第一个 tab 的创建顺序）排列，点击切换任务不改任何排序输入。git 仓库根的
+//! 探测只发生在事件路径（见
 //! [`NebulaWorkspace::resolve_project_group`]），render 路径永远只查内存，
 //! 不做任何磁盘 IO。
 //!
@@ -31,6 +33,10 @@ pub(super) const WORKSPACE_GROUP_KEY: &str = "workspace";
 /// 组头行高（逻辑 px）。比条目矮一档：它是分类标签，不是命中目标优先级
 /// 最高的条目，但 26px 仍高于 20px 的最小命中区起点。
 pub(super) const GROUP_HEADER_H: f32 = 26.0;
+
+/// 本地段与 SSH 段之间分隔行的行高（逻辑 px）：一条 hairline 的呼吸带，
+/// 非交互、非命中目标。
+pub(super) const SECTION_DIVIDER_H: f32 = 14.0;
 
 /// 组头折叠箭头槽宽（最左列）与分支图标边长（与 tag 字号同档）。
 pub(super) const GROUP_CHEVRON_SLOT_W: f32 = 16.0;
@@ -227,14 +233,15 @@ pub(super) fn tree_guides(
             for (tag, child) in ((i + 1)..j).enumerate() {
                 let top = offsets[child] - first_visible_top;
                 let elbow_y = top + elbow_dy;
-                // 任务名肘形：横臂从一级竖线直达图标列（T 字横杠）。
+                // 任务名肘形：横臂从一级竖线指向图标列，左缘留 4px 呼吸
+                //（用户 10-19 裁定：与摘要肘形的间距一致，不再贴住图标）。
                 push_horizontal(
                     &mut guides,
                     group,
                     "elbow",
                     tag,
                     spine,
-                    tree_icon_left(),
+                    tree_icon_left() - 4.0,
                     elbow_y,
                     viewport_h,
                 );
@@ -327,6 +334,14 @@ pub(super) enum SidebarRow {
         count: usize,
         collapsed: bool,
     },
+    /// 本地段与 SSH 段之间的非交互分隔行；仅在两段都有内容时出现。
+    SectionDivider,
+    /// 「SSH 主机」子分区头（本地段之后）：折叠时收起所有主机块，只留本行。
+    SshSectionHeader {
+        /// SSH 段 tab 总数（所有主机之和）。
+        count: usize,
+        collapsed: bool,
+    },
     /// SSH 主机头（顶级容器，键 `ssh:{dest}`）：内含项目子组
     /// （[`SidebarRow::GroupHeader`]），不直接含条目。子组不缩进（用户
     /// 10-13 裁定），与本地组同一几何档位。
@@ -384,16 +399,17 @@ pub(super) struct RecentSessionRow {
 /// 把每个 tab 的分组归属聚合成分组行列表（本地一级组 + SSH「主机 → 项目」
 /// 两级容器）。
 ///
-/// 顺序：**顶层容器**（本地组与 SSH 主机）按首开序混排，本地兜底组全局垫底；
-/// 主机内的项目子组按首开序，主机兜底子组（cwd 未知）垫底。首开序来自
-/// [`NebulaWorkspace::note_project_group_open`] 打点（本地打组键、SSH 打
-/// 主机键与子组键），点击切换任务不改任何输入，顺序自然稳定。未打点的组按
-/// 首见序垫后。组内保持 `tabs` Vec 顺序——分组是呈现，不改变存储顺序，右键/
-/// 键盘等按下标寻址的路径全部不受影响。
+/// 顺序（用户 10-19 裁定）：「当前任务」内部分两段——**本地组在上、SSH
+/// 主机在下**；有 SSH 内容时出「SSH 主机」子分区头（可独立折叠，折叠时收起
+/// 全部主机块），本地段与 SSH 段都有内容时中间再加一条分隔行。段内按**首见
+/// 序**（组/主机在 `infos` 中首次出现，≈ 每个项目第一个 tab 的创建顺序）
+/// 排列：本地兜底组垫本地段底、主机内兜底子组（cwd 未知）垫主机底。组内
+/// 保持 `tabs` Vec 顺序——分组是呈现，不改变存储顺序，右键/键盘等按下标
+/// 寻址的路径全部不受影响。
 pub(super) fn grouped_rows(
     infos: &[TabGroupInfo],
-    open_order: &HashMap<SharedString, u32>,
     collapsed: &HashMap<SharedString, bool>,
+    ssh_section_collapsed: bool,
 ) -> Vec<SidebarRow> {
     struct Group {
         info: TabGroupInfo,
@@ -449,86 +465,94 @@ pub(super) fn grouped_rows(
             },
         }
     }
-    let first_open = |key: &SharedString| open_order.get(key).copied().unwrap_or(u32::MAX);
-    // 主机内子组排序：兜底子组垫底，其余按首开序（打点键即子组键）。
+    // 主机内子组排序：兜底子组垫底，其余按首见序。
     for top in &mut tops {
         if let Top::Host { destination, groups, .. } = top {
             let fallback = super::task_groups_ssh::fallback_child_key(destination);
             groups.sort_by(|a, b| {
                 let rank = |group: &Group| (group.info.key == fallback) as u8;
-                rank(a)
-                    .cmp(&rank(b))
-                    .then(first_open(&a.info.key).cmp(&first_open(&b.info.key)))
-                    .then(a.seen.cmp(&b.seen))
+                rank(a).cmp(&rank(b)).then(a.seen.cmp(&b.seen))
             });
         }
     }
-    // 顶层排序键：本地组用组键、SSH 主机用主机键（都是首开序打点键）。
-    // 闭包写不出「返回值借用参数」的生命周期，用嵌套 fn 的省略规则。
-    fn top_key(top: &Top) -> &SharedString {
-        match top {
-            Top::Local(group) => &group.info.key,
-            Top::Host { host, .. } => host,
+    // 分区（用户 10-19 裁定）：本地段在上、SSH 段在下，各自按首见序；本地
+    // 兜底组只在本地段内垫底（不再与 SSH 主机同场混排）。
+    let (locals, hosts): (Vec<&Top>, Vec<&Top>) =
+        tops.iter().partition(|top| matches!(top, Top::Local(_)));
+    let mut locals: Vec<&Group> = locals
+        .iter()
+        .map(|top| match top {
+            Top::Local(group) => group,
+            Top::Host { .. } => unreachable!("partitioned to the host section"),
+        })
+        .collect();
+    locals.sort_by(|a, b| {
+        let rank = |group: &Group| (group.info.key == WORKSPACE_GROUP_KEY) as u8;
+        rank(a).cmp(&rank(b)).then(a.seen.cmp(&b.seen))
+    });
+    let mut hosts: Vec<(&SharedString, &SharedString, &[Group], usize)> = hosts
+        .iter()
+        .map(|top| match top {
+            Top::Host { host, destination, groups, seen } => {
+                (host, destination, groups.as_slice(), *seen)
+            },
+            Top::Local(_) => unreachable!("partitioned to the local section"),
+        })
+        .collect();
+    hosts.sort_by_key(|&(_, _, _, seen)| seen);
+    let mut rows = Vec::new();
+    for group in &locals {
+        let collapsed = collapsed.get(&group.info.key).copied().unwrap_or(false);
+        rows.push(SidebarRow::GroupHeader {
+            key: group.info.key.clone(),
+            name: group.info.name.clone(),
+            branch: group.info.branch.clone(),
+            tabs: group.tabs.len(),
+            collapsed,
+        });
+        if !collapsed {
+            rows.extend(group.tabs.iter().map(|&ix| SidebarRow::Tab { ix }));
         }
     }
-    tops.sort_by(|a, b| {
-        let rank = |top: &Top| match top {
-            // 本地兜底组全局垫底；SSH 主机与普通本地组同场按首开序混排。
-            Top::Local(group) if group.info.key == WORKSPACE_GROUP_KEY => 1,
-            _ => 0,
-        };
-        // 未打点容器的回落序：首见序（本地组=组首见、主机=主机首见，都随
-        // infos 顺序单调递增）。
-        let seen = |top: &Top| match top {
-            Top::Local(group) => group.seen,
-            Top::Host { seen, .. } => *seen,
-        };
-        rank(a)
-            .cmp(&rank(b))
-            .then(first_open(top_key(a)).cmp(&first_open(top_key(b))))
-            .then(seen(a).cmp(&seen(b)))
-    });
-    let mut rows = Vec::new();
-    for top in &tops {
-        match top {
-            Top::Local(group) => {
-                let collapsed = collapsed.get(&group.info.key).copied().unwrap_or(false);
-                rows.push(SidebarRow::GroupHeader {
-                    key: group.info.key.clone(),
-                    name: group.info.name.clone(),
-                    branch: group.info.branch.clone(),
-                    tabs: group.tabs.len(),
-                    collapsed,
-                });
-                if !collapsed {
-                    rows.extend(group.tabs.iter().map(|&ix| SidebarRow::Tab { ix }));
-                }
-            },
-            Top::Host { host, destination, groups, .. } => {
-                let host_collapsed = collapsed.get(host).copied().unwrap_or(false);
-                rows.push(SidebarRow::HostHeader {
-                    key: host.clone(),
-                    name: destination.clone(),
-                    tabs: groups.iter().map(|group| group.tabs.len()).sum(),
-                    collapsed: host_collapsed,
-                });
-                if host_collapsed {
-                    continue;
-                }
-                for group in groups {
-                    let collapsed = collapsed.get(&group.info.key).copied().unwrap_or(false);
-                    rows.push(SidebarRow::GroupHeader {
-                        key: group.info.key.clone(),
-                        name: group.info.name.clone(),
-                        branch: group.info.branch.clone(),
-                        tabs: group.tabs.len(),
-                        collapsed,
-                    });
-                    if !collapsed {
-                        rows.extend(group.tabs.iter().map(|&ix| SidebarRow::Tab { ix }));
-                    }
-                }
-            },
+    if hosts.is_empty() {
+        return rows;
+    }
+    // SSH 子分区头只要有 SSH 内容就出现（纯 SSH 场景它是唯一的段折叠开关，
+    // 不能随段折叠一起消失）；分隔行只在两段都有内容时才需要。
+    let ssh_tabs: usize = hosts
+        .iter()
+        .map(|(_, _, groups, _)| groups.iter().map(|group| group.tabs.len()).sum::<usize>())
+        .sum();
+    if !locals.is_empty() {
+        rows.push(SidebarRow::SectionDivider);
+    }
+    rows.push(SidebarRow::SshSectionHeader { count: ssh_tabs, collapsed: ssh_section_collapsed });
+    if ssh_section_collapsed {
+        return rows;
+    }
+    for (host, destination, groups, _) in hosts {
+        let host_collapsed = collapsed.get(host).copied().unwrap_or(false);
+        rows.push(SidebarRow::HostHeader {
+            key: host.clone(),
+            name: destination.clone(),
+            tabs: groups.iter().map(|group| group.tabs.len()).sum(),
+            collapsed: host_collapsed,
+        });
+        if host_collapsed {
+            continue;
+        }
+        for group in groups {
+            let collapsed = collapsed.get(&group.info.key).copied().unwrap_or(false);
+            rows.push(SidebarRow::GroupHeader {
+                key: group.info.key.clone(),
+                name: group.info.name.clone(),
+                branch: group.info.branch.clone(),
+                tabs: group.tabs.len(),
+                collapsed,
+            });
+            if !collapsed {
+                rows.extend(group.tabs.iter().map(|&ix| SidebarRow::Tab { ix }));
+            }
         }
     }
     rows
@@ -536,14 +560,15 @@ pub(super) fn grouped_rows(
 
 pub(super) fn row_height(row: &SidebarRow, metrics: &RowMetrics) -> f32 {
     match row {
-        SidebarRow::TabsSectionHeader { .. } | SidebarRow::RecentSectionHeader { .. } => {
-            super::tab_scroll::tab_row_height(metrics.density)
-        },
+        SidebarRow::TabsSectionHeader { .. }
+        | SidebarRow::RecentSectionHeader { .. }
+        | SidebarRow::SshSectionHeader { .. } => super::tab_scroll::tab_row_height(metrics.density),
         SidebarRow::GroupHeader { .. }
         | SidebarRow::RecentGroupHeader { .. }
         | SidebarRow::HostHeader { .. } => GROUP_HEADER_H,
         SidebarRow::Tab { .. } | SidebarRow::RecentSession(_) => sidebar_entry_height(metrics),
         SidebarRow::RecentStatus { .. } => GROUP_HEADER_H,
+        SidebarRow::SectionDivider => SECTION_DIVIDER_H,
     }
 }
 
@@ -651,19 +676,10 @@ impl NebulaWorkspace {
         cx: &App,
     ) {
         let view = view.read(cx);
-        if let Some(destination) = view.ssh_destination.as_deref() {
-            // SSH 主机分组：主机键与项目子键都打首开点（排序输入）；子键派生
-            // 与 render 共用 `ssh_group_info`，防两处漂移。远端组键不进
-            // `project_group_cache`——远端路径与本地路径是两个键空间；远端
-            // 仓库根由集成上报，集成哑掉（fish 等嵌套 shell）时由按 pane 的
-            // `rev-parse` 探测补位，不碰本地缓存。
-            let info = super::task_groups_ssh::ssh_group_info(
-                destination,
-                &view,
-                self.remote_git.project(view.pane_id),
-            );
-            self.note_project_group_open(&super::task_groups_ssh::host_key(destination));
-            self.note_project_group_open(&info.key);
+        if view.ssh_destination.is_some() {
+            // SSH pane 不走本地缓存链：远端组键由 render 路径的 `ssh_group_info`
+            // 从集成上报根/远端 cwd 派生，远端身份探测（rev-parse 补位）在
+            // `refresh_remote_project` 的同一条事件沿上独立进行。
             return;
         }
         let cwd = view.cwd.as_str();
@@ -691,19 +707,20 @@ impl NebulaWorkspace {
             normalized
         };
         let branch = crate::display::side_panel::git_head_branch(Path::new(&key));
-        let entry = LocalProject {
-            root: SharedString::from(key),
-            branch: branch.map(SharedString::from),
-        };
-        self.note_project_group_open(&entry.root);
+        let entry =
+            LocalProject { root: SharedString::from(key), branch: branch.map(SharedString::from) };
         self.project_group_cache.insert(cwd.to_owned(), entry);
     }
 
-    /// 记录组键首次被观测的序号（项目首开序）。事件路径专用；render 只读
-    /// [`Self::project_group_open_order`]。同一键幂等。
-    pub(super) fn note_project_group_open(&mut self, key: &SharedString) {
-        let next = self.project_group_open_order.len() as u32;
-        self.project_group_open_order.entry(key.clone()).or_insert(next);
+    /// 折叠/展开 SSH 段（用户 10-19 裁定：「SSH 主机」子分区头收起全部主机
+    /// 块，与「当前任务」总折叠、项目组折叠同一交互模式）。折叠即时生效，
+    /// 行数变化后就地钳制滚动窗口（同 `toggle_tree_tabs_section`）。
+    pub(super) fn toggle_ssh_section(&mut self, cx: &mut gpui::Context<Self>) {
+        self.ssh_section_collapsed = !self.ssh_section_collapsed;
+        // 行移位，菜单锚定的那一行不在原处了。
+        self.tab_menu = None;
+        self.clamp_rows_after_group_toggle(cx);
+        cx.notify();
     }
 
     /// 单个 tab 的分组归属（render 路径，纯内存读）。缓存未命中时先用 cwd
@@ -748,7 +765,7 @@ impl NebulaWorkspace {
     pub(super) fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
         let infos: Vec<TabGroupInfo> =
             (0..self.tabs.len()).map(|ix| self.tab_group_info(ix, cx)).collect();
-        grouped_rows(&infos, &self.project_group_open_order, &self.sidebar_group_collapsed)
+        grouped_rows(&infos, &self.sidebar_group_collapsed, self.ssh_section_collapsed)
     }
 
     /// 统一侧栏列表的行模型：两个分区头与其内容展开成**一个**序列，由单一
@@ -780,7 +797,9 @@ impl NebulaWorkspace {
     /// 组头行：文件夹图标 + 项目名 + 分支 chip + tab 数 + 折叠箭头。
     /// 行宽必须显式像素（同 tab 行的教训：容器 overflow_hidden 下 w_full
     /// 会回落 shrink-to-fit）。SSH 主机下的项目子组不缩进（用户 10-13
-    /// 裁定），与本地组同几何：箭头中心落在 [`TREE_X_L1`]。
+    /// 裁定），与本地组同几何：箭头中心落在 [`TREE_X_L1`]。悬浮命中分两级
+    /// （用户 10-20 裁定）：分支 chip 给完整分支名，行上其余位置给行级
+    /// 「折叠分组」默认——两种组（本地/SSH 子组）共用本渲染。
     pub(super) fn render_group_header(
         &self,
         row_w: f32,
@@ -834,7 +853,14 @@ impl NebulaWorkspace {
             .cursor_pointer()
             .text_color(muted)
             .hover(|style| style.bg(hover_bg))
-            .tooltip(move |window, cx| tab_presentation::tooltip(tooltip.into(), window, cx))
+            .tooltip(move |window, cx| {
+                tab_presentation::tooltip_with_selector(
+                    tooltip.into(),
+                    "sidebar-group-tip",
+                    window,
+                    cx,
+                )
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_sidebar_group(toggle_key.clone(), cx);
             }))
@@ -875,9 +901,20 @@ impl NebulaWorkspace {
                     .child(name_text),
             )
             // 分支块整体在项目名右侧（间隔略大），图标与文字同一前景色。
+            // chip 文本截断在 40% 行宽内，长分支读不全：悬浮到 chip 上给完整
+            // 分支名，行上其余位置保持行级「折叠分组」默认（用户 10-20
+            // 裁定）。两条规则各有一半靠 gpui 的机制：
+            // - chip 的 tooltip **零延迟**：指针进 chip 即显示，赶在行级
+            //   500ms 延迟到期前占住显示位——否则指针从行内其他位置一路
+            //   划进 chip 时，会先闪一下「折叠分组」再换成分支名（用户
+            //   10-20 追加裁定：直接展示，不出两级提示的序列）。
+            // - 优先级：chip 是行 tooltip 的子元素，prepaint 晚于行、窗口
+            //   取最后注册的 tooltip，子级提示盖过行级默认，不必关行 tooltip。
             .when_some(branch.as_ref(), |row, branch| {
+                let branch_tooltip = branch.clone();
                 row.child(
                     h_flex()
+                        .id(("sidebar-group-branch", row_ix))
                         .debug_selector(move || branch_selector.to_string())
                         .flex_shrink_0()
                         .ml(px(10.0))
@@ -885,6 +922,15 @@ impl NebulaWorkspace {
                         .gap(px(3.0))
                         .items_center()
                         .text_color(theme.warning)
+                        .tooltip_show_delay(std::time::Duration::ZERO)
+                        .tooltip(move |window, cx| {
+                            tab_presentation::tooltip_with_selector(
+                                branch_tooltip.clone(),
+                                "sidebar-group-branch-tip",
+                                window,
+                                cx,
+                            )
+                        })
                         .child(
                             Icon::new(Icon::empty())
                                 .path(crate::gpui_shell::assets::nav::GIT_BRANCH)
@@ -976,7 +1022,7 @@ mod tests {
     #[test]
     fn same_key_tabs_share_one_group_in_vec_order() {
         let infos = [info("D:/repo"), info("D:/other"), info("D:/repo")];
-        let rows = grouped_rows(&infos, &HashMap::new(), &HashMap::new());
+        let rows = grouped_rows(&infos, &HashMap::new(), false);
         assert_eq!(
             rows,
             vec![
@@ -1002,7 +1048,8 @@ mod tests {
     }
 
     /// SSH 主机的两级呈现：主机头承载全部计数，项目子组各带
-    /// 自己的条目；同一主机的子组之间保持首开序。
+    /// 自己的条目；同一主机的子组之间保持首见序。本地段在上、SSH 段在
+    /// 下（用户 10-19 裁定），两段之间出分隔行 + 「SSH 主机」子分区头。
     #[test]
     fn ssh_tabs_nest_under_one_host_header_with_project_subgroups() {
         let infos = [
@@ -1011,10 +1058,21 @@ mod tests {
             host_info("build@10.0.0.7", "/home/user/other"),
             info("D:/local"),
         ];
-        let rows = grouped_rows(&infos, &HashMap::new(), &HashMap::new());
+        let rows = grouped_rows(&infos, &HashMap::new(), false);
         assert_eq!(
             rows,
             vec![
+                // 本地段先出（首见序：本地组首见在 SSH 之后也照样在上）。
+                SidebarRow::GroupHeader {
+                    key: "D:/local".into(),
+                    name: "D:/local".into(),
+                    branch: None,
+                    tabs: 1,
+                    collapsed: false
+                },
+                SidebarRow::Tab { ix: 3 },
+                SidebarRow::SectionDivider,
+                SidebarRow::SshSectionHeader { count: 3, collapsed: false },
                 SidebarRow::HostHeader {
                     key: "ssh:build@10.0.0.7".into(),
                     name: "build@10.0.0.7".into(),
@@ -1038,20 +1096,13 @@ mod tests {
                     collapsed: false,
                 },
                 SidebarRow::Tab { ix: 2 },
-                SidebarRow::GroupHeader {
-                    key: "D:/local".into(),
-                    name: "D:/local".into(),
-                    branch: None,
-                    tabs: 1,
-                    collapsed: false
-                },
-                SidebarRow::Tab { ix: 3 },
             ]
         );
     }
 
     /// 主机折叠只剩主机头；子组折叠只留子组头——两级共用同一张折叠表，
-    /// 键前缀隔离。
+    /// 键前缀隔离。纯 SSH 场景无分隔行（本地段空），子分区头仍在（它是
+    /// 唯一的段折叠开关，不能随段折叠一起消失）。
     #[test]
     fn host_and_subgroup_collapse_independently() {
         let infos = [
@@ -1060,20 +1111,24 @@ mod tests {
         ];
         let host_collapsed = HashMap::from([("ssh:build@10.0.0.7".to_string().into(), true)]);
         assert_eq!(
-            grouped_rows(&infos, &HashMap::new(), &host_collapsed),
-            vec![SidebarRow::HostHeader {
-                key: "ssh:build@10.0.0.7".into(),
-                name: "build@10.0.0.7".into(),
-                tabs: 2,
-                collapsed: true
-            }]
+            grouped_rows(&infos, &host_collapsed, false),
+            vec![
+                SidebarRow::SshSectionHeader { count: 2, collapsed: false },
+                SidebarRow::HostHeader {
+                    key: "ssh:build@10.0.0.7".into(),
+                    name: "build@10.0.0.7".into(),
+                    tabs: 2,
+                    collapsed: true
+                }
+            ]
         );
         let subgroup_collapsed =
             HashMap::from([("ssh:build@10.0.0.7|/srv/pebrel".to_string().into(), true)]);
-        let rows = grouped_rows(&infos, &HashMap::new(), &subgroup_collapsed);
+        let rows = grouped_rows(&infos, &subgroup_collapsed, false);
         assert_eq!(
             rows,
             vec![
+                SidebarRow::SshSectionHeader { count: 2, collapsed: false },
                 SidebarRow::HostHeader {
                     key: "ssh:build@10.0.0.7".into(),
                     name: "build@10.0.0.7".into(),
@@ -1099,55 +1154,56 @@ mod tests {
         );
     }
 
-    /// 顶层排序：SSH 主机与本地组按首开序混排（主机键、本地组键各自打点），
-    /// 本地兜底组仍全局垫底；主机内的兜底子组（cwd 未知）垫在主机内底部。
+    /// 分区语义（用户 10-19 裁定）：本地组在上、SSH 主机在下，段间分隔行
+    /// + 子分区头；本地兜底组垫**本地段**底（不再与 SSH 主机同场混排）；
+    /// 主机内的兜底子组（cwd 未知）垫在主机内底部。
     #[test]
-    fn hosts_mix_with_local_groups_by_first_open_and_fallbacks_sink() {
+    fn locals_precede_ssh_hosts_with_a_divider_and_fallbacks_sink() {
         let infos = [
             info(WORKSPACE_GROUP_KEY),
             info("D:/local"),
             host_info("build@10.0.0.7", "workspace"),
             host_info("build@10.0.0.7", "/srv/pebrel"),
         ];
-        let open_order = HashMap::from([
-            ("ssh:build@10.0.0.7".to_string().into(), 0u32),
-            ("D:/local".to_string().into(), 1u32),
-        ]);
-        let rows = grouped_rows(&infos, &open_order, &HashMap::new());
+        let rows = grouped_rows(&infos, &HashMap::new(), false);
         let kinds: Vec<String> = rows
             .iter()
             .map(|row| match row {
                 SidebarRow::HostHeader { key, .. } => format!("host:{key}"),
                 SidebarRow::GroupHeader { key, .. } => format!("group:{key}"),
                 SidebarRow::Tab { ix } => format!("tab{ix}"),
+                SidebarRow::SectionDivider => "divider".to_owned(),
+                SidebarRow::SshSectionHeader { .. } => "ssh-section".to_owned(),
                 other => format!("{other:?}"),
             })
             .collect();
         assert_eq!(
             kinds,
             vec![
+                // 本地段：普通组按首见序在前，兜底组垫本地段底。
+                "group:D:/local".to_owned(),
+                "tab1".to_owned(),
+                format!("group:{WORKSPACE_GROUP_KEY}"),
+                "tab0".to_owned(),
+                // 两段都非空 → 分隔行 + 「SSH 主机」子分区头。
+                "divider".to_owned(),
+                "ssh-section".to_owned(),
                 "host:ssh:build@10.0.0.7".to_owned(),
                 // 主机内：项目子组在前，兜底子组（cwd 未知）垫底。
                 "group:ssh:build@10.0.0.7|/srv/pebrel".to_owned(),
                 "tab3".to_owned(),
                 "group:ssh:build@10.0.0.7|workspace".to_owned(),
                 "tab2".to_owned(),
-                "group:D:/local".to_owned(),
-                "tab1".to_owned(),
-                // 本地兜底组全局垫底。
-                format!("group:{WORKSPACE_GROUP_KEY}"),
-                "tab0".to_owned(),
             ]
         );
     }
 
+    /// 首见序排序：组顺序就是 `infos` 中首次出现的顺序（≈ 每个项目第一个
+    /// tab 的创建顺序），兜底组恒垫底。首开序打点已随 10-19 分区裁定退役。
     #[test]
-    fn groups_follow_first_open_order_and_workspace_stays_last() {
+    fn groups_follow_first_seen_order_and_workspace_stays_last() {
         let infos = [info(WORKSPACE_GROUP_KEY), info("D:/a"), info("D:/b")];
-        let open_order =
-            HashMap::from([("D:/a".to_string().into(), 1u32), ("D:/b".to_string().into(), 0u32)]);
-        // 首开序 b(0) → a(1)；兜底组恒垫底，与打点无关。
-        let rows = grouped_rows(&infos, &open_order, &HashMap::new());
+        let rows = grouped_rows(&infos, &HashMap::new(), false);
         let keys: Vec<&SharedString> = rows
             .iter()
             .filter_map(|row| match row {
@@ -1157,16 +1213,12 @@ mod tests {
             .collect();
         let (a, b, ws): (SharedString, SharedString, SharedString) =
             ("D:/a".into(), "D:/b".into(), WORKSPACE_GROUP_KEY.into());
-        assert_eq!(keys, vec![&b, &a, &ws]);
-    }
-
-    #[test]
-    fn unnoted_groups_sink_by_first_seen_order() {
-        // 无打点（git 根解析前）的临时组按首见序垫在打点组之后。
+        // 首见序 a → b；兜底组恒垫底。
+        assert_eq!(keys, vec![&a, &b, &ws]);
+        // 首见序即输入序：无任何打点/重排输入，git 根解析前的临时组同样
+        // 按首见序就位（旧「未打点垫后」概念随打点一起消亡）。
         let infos = [info("D:/b"), info("D:/tmp"), info("D:/a")];
-        let open_order =
-            HashMap::from([("D:/a".to_string().into(), 0u32), ("D:/b".to_string().into(), 1u32)]);
-        let rows = grouped_rows(&infos, &open_order, &HashMap::new());
+        let rows = grouped_rows(&infos, &HashMap::new(), false);
         let keys: Vec<String> = rows
             .iter()
             .filter_map(|row| match row {
@@ -1174,14 +1226,51 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(keys, vec!["D:/a".to_string(), "D:/b".to_string(), "D:/tmp".to_string()]);
+        assert_eq!(keys, vec!["D:/b".to_string(), "D:/tmp".to_string(), "D:/a".to_string()]);
+    }
+
+    /// SSH 段折叠只留子分区头（主机块整体收起）；展开恢复。纯本地输入
+    /// 不产出任何 SSH 段元素。
+    #[test]
+    fn ssh_section_collapse_keeps_only_its_header_and_locals_have_none() {
+        let infos = [
+            info("D:/local"),
+            host_info("build@10.0.0.7", "/srv/pebrel"),
+            host_info("other@host", "/srv/other"),
+        ];
+        let rows = grouped_rows(&infos, &HashMap::new(), true);
+        let kinds: Vec<String> = rows
+            .iter()
+            .map(|row| match row {
+                SidebarRow::GroupHeader { key, .. } => format!("group:{key}"),
+                SidebarRow::Tab { ix } => format!("tab{ix}"),
+                SidebarRow::SectionDivider => "divider".to_owned(),
+                SidebarRow::SshSectionHeader { .. } => "ssh-section".to_owned(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "group:D:/local".to_owned(),
+                "tab0".to_owned(),
+                "divider".to_owned(),
+                "ssh-section".to_owned()
+            ]
+        );
+        // 纯本地：无 divider、无子分区头。
+        let local_only = [info("D:/a"), info("D:/b")];
+        let rows = grouped_rows(&local_only, &HashMap::new(), false);
+        assert!(rows.iter().all(|row| {
+            !matches!(row, SidebarRow::SectionDivider | SidebarRow::SshSectionHeader { .. })
+        }));
     }
 
     #[test]
     fn collapsed_group_keeps_only_its_header() {
         let infos = [info("D:/repo"), info("D:/repo")];
         let collapsed = HashMap::from([("D:/repo".to_string().into(), true)]);
-        let rows = grouped_rows(&infos, &HashMap::new(), &collapsed);
+        let rows = grouped_rows(&infos, &collapsed, false);
         assert_eq!(
             rows,
             vec![SidebarRow::GroupHeader {
@@ -1200,7 +1289,7 @@ mod tests {
         first.branch = Some("main".into());
         let mut second = info("D:/repo");
         second.branch = Some("dev".into());
-        let rows = grouped_rows(&[first, second], &HashMap::new(), &HashMap::new());
+        let rows = grouped_rows(&[first, second], &HashMap::new(), false);
         match &rows[0] {
             SidebarRow::GroupHeader { branch, .. } => {
                 assert_eq!(branch.as_deref(), Some("main"));
@@ -1277,11 +1366,12 @@ mod tests {
         assert_eq!(l1.bounds.2, GUIDE_THICKNESS);
         assert_eq!(l1.bounds.1, offsets[1] + GROUP_HEADER_H * 0.5);
         assert_eq!(l1.bounds.1 + l1.bounds.3, offsets[3] + elbow_dy);
-        // 任务肘形：横臂从一级竖线直达图标列（T 字横杠）。
+        // 任务肘形：横臂从一级竖线指向图标列左缘前 4px（用户 10-19 裁定：
+        // 与摘要肘形同一呼吸间距，不再贴住图标）。
         assert_eq!(guides.iter().filter(|g| g.kind == "elbow").count(), 2);
         let elbow0 = find("elbow", 0);
         assert_eq!(elbow0.bounds.0, TREE_X_L1);
-        assert_eq!(elbow0.bounds.2, tree_icon_left() - TREE_X_L1);
+        assert_eq!(elbow0.bounds.2, tree_icon_left() - 4.0 - TREE_X_L1);
         assert_eq!(elbow0.bounds.3, GUIDE_THICKNESS);
         assert_eq!(elbow0.bounds.1 + GUIDE_THICKNESS * 0.5, offsets[2] + elbow_dy);
         // 摘要悬挂竖线：任务肘形交点 → 摘要肘形；摘要肘形横臂指向摘要首行
@@ -1365,12 +1455,13 @@ mod tests {
             guides.iter().all(|guide| guide.kind != "hostv" && guide.kind != "hoste"),
             "host-level guides were removed by the 10-13 ruling"
         );
-        // 子组不缩进：l1 / 任务肘形 / 摘要线全部落在本地档位。
+        // 子组不缩进：l1 / 任务肘形 / 摘要线全部落在本地档位；肘形终点
+        // 同样留 4px 呼吸（10-19 裁定与本地组一致）。
         let l1 = guides.iter().find(|g| g.kind == "l1").unwrap();
         assert_eq!(l1.bounds.0, TREE_X_L1);
         let elbow0 = guides.iter().find(|g| g.kind == "elbow" && g.tag == 0).unwrap();
         assert_eq!(elbow0.bounds.0, TREE_X_L1);
-        assert_eq!(elbow0.bounds.0 + elbow0.bounds.2, tree_icon_left());
+        assert_eq!(elbow0.bounds.0 + elbow0.bounds.2, tree_icon_left() - 4.0);
         let sumv0 = guides.iter().find(|g| g.kind == "sumv" && g.tag == 0).unwrap();
         assert_eq!(sumv0.bounds.0, TREE_X_L2);
         // 主机折叠：整块不产线段。

@@ -150,6 +150,12 @@ impl NebulaWorkspace {
                 SidebarRow::TabsSectionHeader { count, collapsed } => self
                     .render_tabs_section_header(row_w, *count, *collapsed, cx)
                     .into_any_element(),
+                SidebarRow::SectionDivider => self
+                    .render_section_divider(row_w, cx)
+                    .into_any_element(),
+                SidebarRow::SshSectionHeader { count, collapsed } => self
+                    .render_ssh_section_header(row_w, *count, *collapsed, cx)
+                    .into_any_element(),
                 SidebarRow::HostHeader { key, name, tabs, collapsed } => self
                     .render_ssh_host_header(row_w, row_ix, key, name, *tabs, *collapsed, cx)
                     .into_any_element(),
@@ -817,6 +823,119 @@ impl NebulaWorkspace {
                                     .with_size(px(SIDEBAR_HEADER_ICON)),
                             ),
                     ),
+            )
+            .into_any_element()
+    }
+
+    /// 本地段与 SSH 段之间的分隔行：垂直居中一条 hairline（与分区头右侧
+    /// 延伸线同色源），左右 8px 呼吸。非交互、无命中语义；行宽显式像素
+    /// （同条目行的 overflow_hidden 教训）。
+    fn render_section_divider(&self, row_w: f32, cx: &Context<Self>) -> gpui::AnyElement {
+        div()
+            .debug_selector(|| "sidebar-section-divider".to_owned())
+            .w(px(row_w))
+            .h(px(task_groups::SECTION_DIVIDER_H))
+            .flex_shrink_0()
+            .px_2()
+            .flex()
+            .items_center()
+            .child(div().h(px(1.0)).flex_1().bg(crate::gpui_shell::theme::card_divider_color(cx)))
+            .into_any_element()
+    }
+
+    /// 「SSH 主机」子分区头行：折叠箭头 + 标题 + 计数，收起全部主机块
+    /// （用户 10-19 裁定：本地段在上、SSH 段在下的下段开关）。与「当前
+    /// 任务」总头同一解剖与缩进档位，但无 +/⋯ 动作钮（新建终端是本地
+    /// 动作）；行宽显式像素。
+    fn render_ssh_section_header(
+        &self,
+        row_w: f32,
+        count: usize,
+        collapsed: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let faint = crate::gpui_shell::theme::faint_ink(cx);
+        let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
+        let label_px = settings.map(|settings| settings.ui_font_size_px).unwrap_or(15.0);
+        let chrome_family = theme.mono_font_family.clone();
+        let language = crate::gpui_shell::config::ui_language(cx);
+        let count_text: SharedString = count.to_string().into();
+        let row_height = tab_scroll::tab_row_height(self.density);
+        h_flex()
+            .id("sidebar-ssh-section-toggle")
+            .debug_selector(|| "sidebar-ssh-section-toggle".to_owned())
+            .w(px(row_w))
+            .h(px(row_height))
+            .pb_1()
+            .pl_2()
+            .items_center()
+            .cursor_pointer()
+            .flex_shrink_0()
+            // 命中整条分区头（同「当前任务」头）：右侧空白区也能折叠。
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_ssh_section(cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _: &MouseDownEvent, _, _| {}),
+            )
+            .child(
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .font_family(chrome_family)
+                    .pr_1()
+                    .child(
+                        h_flex()
+                            .w(px(TABS_DISCLOSURE_SLOT_W))
+                            .h_full()
+                            .flex_shrink_0()
+                            .items_center()
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .xsmall()
+                                .text_color(muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(muted)
+                            .child(language.text(Message::SidebarSshSection)),
+                    )
+                    .child(
+                        // 计数 chip 同「当前任务」头的公式与 ink_faint。
+                        h_flex()
+                            .ml_2()
+                            .h(px((label_px * 1.22 * SIDEBAR_TITLE_SCALE * 1.18).max(11.0)))
+                            .min_w(px(label_px * 0.62 + 8.0))
+                            .px_2()
+                            .justify_center()
+                            .items_center()
+                            .rounded_full()
+                            .bg(theme.muted)
+                            .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(faint)
+                            .child(count_text),
+                    ),
+            )
+            // 标题行右侧 hairline 填满剩余宽度（同「当前任务」头，无动作钮
+            // 时直达右缘）。
+            .child(
+                div()
+                    .debug_selector(|| "sidebar-ssh-hairline".to_owned())
+                    .flex_1()
+                    .ml_2()
+                    .h(px(1.0))
+                    .bg(crate::gpui_shell::theme::card_divider_color(cx)),
             )
             .into_any_element()
     }

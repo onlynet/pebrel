@@ -39,6 +39,7 @@
     "recent_tasks": "Recent tasks",
     "group_workspace": "Workspace",
     "ssh_host": "SSH [{host}]",
+    "ssh_section": "SSH hosts",
     "new_session": "New session",
     "collapse_group": "Collapse group",
     "expand_group": "Expand group",

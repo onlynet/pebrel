@@ -234,14 +234,31 @@ fn agent_headline(
     if custom_name.is_some() {
         return title;
     }
-    agent
-        .map(|agent| SharedString::from(agent.display_name()))
-        .unwrap_or(title)
+    agent.map(|agent| SharedString::from(agent.display_name())).unwrap_or(title)
 }
 
 pub(super) fn tooltip(text: SharedString, window: &mut Window, cx: &mut App) -> gpui::AnyView {
     gpui_component::tooltip::Tooltip::element(move |_, _| {
         div().max_w(px(560.0)).whitespace_normal().child(text.clone())
+    })
+    .build(window, cx)
+}
+
+/// [`tooltip`] 的可寻址变体：内容根带 debug selector。tooltip 是窗口级覆盖
+/// 层，UI 测试断言「悬浮层确实画出了这段文本」只能靠 debug_bounds 寻址
+/// （同一时刻窗口至多画一个 tooltip，静态 selector 多行共用不冲突）。
+pub(super) fn tooltip_with_selector(
+    text: SharedString,
+    selector: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyView {
+    gpui_component::tooltip::Tooltip::element(move |_, _| {
+        div()
+            .debug_selector(move || selector.to_owned())
+            .max_w(px(560.0))
+            .whitespace_normal()
+            .child(text.clone())
     })
     .build(window, cx)
 }

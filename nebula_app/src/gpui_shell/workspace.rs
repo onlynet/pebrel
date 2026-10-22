@@ -621,6 +621,8 @@ pub struct NebulaWorkspace {
     sidebar_collapsed: bool,
     /// 只折叠 TABS 分区，不影响整个左栏；与旧壳分区标题的 chevron 同义。
     tabs_section_collapsed: bool,
+    /// 折叠「SSH 主机」子分区：收起全部主机块只留子分区头（内存态不持久化）。
+    ssh_section_collapsed: bool,
     /// 标签栏布局：默认沿用左侧栏；Top 将同一组 tab 放进标题栏。
     tabs_position: nebula_settings::TabsPositionName,
     density: nebula_settings::DensityName,
@@ -650,9 +652,6 @@ pub struct NebulaWorkspace {
     /// 根探测只在事件路径（`resolve_project_group`），render 永远只查内存。
     sidebar_group_collapsed: HashMap<SharedString, bool>,
     project_group_cache: HashMap<String, task_groups::LocalProject>,
-    /// 组键 → 项目首开序（首次被观测的次序），侧栏分组排序用；同样只在
-    /// 事件路径打点（`note_project_group_open`），不持久化。
-    project_group_open_order: HashMap<SharedString, u32>,
     recent_sessions: recent_sessions::RecentSessionsState,
     /// 顶栏 tab 的水平滚动；ScrollHandle 负责内容边界钳制。
     top_tabs_scroll: gpui::ScrollHandle,
@@ -913,6 +912,7 @@ impl NebulaWorkspace {
             settings_restore_side_panel_open: false,
             sidebar_collapsed: false,
             tabs_section_collapsed: false,
+            ssh_section_collapsed: false,
             tabs_position: runtime.tabs_position,
             density: runtime.density,
             sidebar_width,
@@ -929,7 +929,6 @@ impl NebulaWorkspace {
             tabs_list_hot: false,
             sidebar_group_collapsed: HashMap::new(),
             project_group_cache: HashMap::new(),
-            project_group_open_order: HashMap::new(),
             recent_sessions: Default::default(),
             top_tabs_scroll: gpui::ScrollHandle::new(),
             initial_grid,
@@ -1852,6 +1851,7 @@ impl NebulaWorkspace {
         }
         self.file_tree_menu = None;
         self.side_panel.toggle(view);
+        self.wake_remote_git_refresh();
         let (cwd, wsl) = self.side_panel_follow(cx);
         self.side_panel.sync_at(cwd, wsl);
         cx.notify();

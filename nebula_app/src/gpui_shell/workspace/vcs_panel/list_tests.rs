@@ -139,7 +139,9 @@ fn git_list_repaints_visible_rows_and_clicks_the_scrolled_path(cx: &mut TestAppC
     });
     cx.update(|window, cx| {
         owner.update(cx, |workspace, _| {
-            workspace.vcs_list.sync(Some(history), GitPanelView::History, Some(root.clone()));
+            workspace
+                .vcs_list
+                .sync(Some(history), GitPanelView::History, Some(root.clone()), false);
         });
         probe.update(cx, |_, cx| cx.notify());
         let _ = window.draw(cx);

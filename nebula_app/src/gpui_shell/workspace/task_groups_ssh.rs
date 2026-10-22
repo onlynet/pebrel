@@ -18,8 +18,8 @@
 use super::task_groups::TabGroupInfo;
 use super::*;
 
-/// 主机键前缀，与 `recent:` 前缀同一约定：折叠表与首开序打点共用键空间，
-/// 前缀隔离后互不干扰。
+/// 主机键前缀，与 `recent:` 前缀同一约定：与侧栏折叠表
+/// （`sidebar_group_collapsed`）共用键空间，前缀隔离后互不干扰。
 pub(super) const HOST_KEY_PREFIX: &str = "ssh:";
 /// 主机键与子组路径段的分隔符（只拼不解）。
 const KEY_PATH_SEPARATOR: char = '|';
@@ -233,18 +233,18 @@ impl NebulaWorkspace {
                     ),
             )
             .child(
-                // SSH 身份沿用 pane_header 的 Nerd Font 字位（U+F0716，与终端
-                // pane 头同一图形语言）；nav 资产集没有服务器图标。
-                div()
+                // SSH 身份用 Network 矢量图标（用户 10-19 裁定替换 Nerd Font
+                // 字位 U+F0716——缺字体的环境里渲染近似「H+」）；与 ssh_dialog
+                // 的 SSH 图标同一语义。宽度槽不变，行几何不动。
+                h_flex()
                     .w(px(TAB_LABEL_ICON_W))
                     .flex_shrink_0()
-                    .font_family(SharedString::from(
-                        crate::font_install::REQUIRED_FONT_FAMILY,
-                    ))
-                    .text_size(px(label_px))
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(muted)
-                    .child("\u{f0716}"),
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::Network)
+                            .xsmall()
+                            .text_color(muted),
+                    ),
             )
             .child(
                 div()

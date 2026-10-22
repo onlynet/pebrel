@@ -36,11 +36,8 @@ fn open_workspace(
                 // 行尾跟随平台：Windows 上编辑器把 LF 规范化为 CRLF，文档会
                 // 立刻被判 dirty，关闭 Code tab 时弹确认框拦截——fixture 写
                 // 平台原生行尾才能保持「打开即干净」的前置。
-                std::fs::write(
-                    &path,
-                    if cfg!(windows) { "fixture\r\n" } else { "fixture\n" },
-                )
-                .unwrap();
+                std::fs::write(&path, if cfg!(windows) { "fixture\r\n" } else { "fixture\n" })
+                    .unwrap();
                 let view =
                     cx.new(|cx| crate::gpui_shell::code_tab::CodeTabView::new(path, window, cx));
                 let subscription = cx.subscribe(&view, |_, _, _, _| {});
@@ -139,7 +136,10 @@ fn switching_top_tabs_keeps_settings_reachable_until_explicit_close(cx: &mut Tes
 }
 
 #[gpui::test]
-#[cfg_attr(windows, ignore = "Windows test host: ctrl-shift-w does not reach workspace actions; Linux CI owns this regression")]
+#[cfg_attr(
+    windows,
+    ignore = "Windows test host: ctrl-shift-w does not reach workspace actions; Linux CI owns this regression"
+)]
 fn keyboard_navigation_can_return_to_background_settings(cx: &mut TestAppContext) {
     let (_directory, workspace, mut cx) = open_workspace(2, cx);
     let [first_tab, third_tab] = numbered_tab_shortcuts();
@@ -211,7 +211,10 @@ fn instant_slide_animation_keeps_the_side_panel_static(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-#[cfg_attr(windows, ignore = "Windows test host: ctrl-shift-w does not reach workspace actions; Linux CI owns this regression")]
+#[cfg_attr(
+    windows,
+    ignore = "Windows test host: ctrl-shift-w does not reach workspace actions; Linux CI owns this regression"
+)]
 fn closing_last_regular_tab_keeps_settings_until_it_is_closed(cx: &mut TestAppContext) {
     let (_directory, workspace, mut cx) = open_workspace(1, cx);
     click_tab("top-tab-0", &mut cx);
@@ -556,8 +559,9 @@ fn sidebar_groups_tabs_under_a_collapsible_header(cx: &mut TestAppContext) {
     ));
     assert_eq!(f32::from(first.size.height), entry_h);
     assert_eq!(f32::from(second.top() - first.top()), entry_h + 8.0);
-    // 目录树线：一级竖线对齐组头折叠箭头中心；任务肘形横臂直达图标列
-    // （T 字横杠）；摘要悬挂竖线 + 肘形横臂指向摘要首行文字。
+    // 目录树线：一级竖线对齐组头折叠箭头中心；任务肘形横臂指向图标列左缘
+    // 前 4px（T 字横杠，与摘要肘形同一呼吸间距）；摘要悬挂竖线 + 肘形横臂
+    // 指向摘要首行文字。
     let l1 = tab_bounds("sidebar-guide-l1-0-0", &mut cx);
     let elbow = tab_bounds("sidebar-guide-elbow-0-0", &mut cx);
     let sumv = tab_bounds("sidebar-guide-sumv-0-0", &mut cx);
@@ -575,8 +579,9 @@ fn sidebar_groups_tabs_under_a_collapsible_header(cx: &mut TestAppContext) {
         "elbow sits on the first line band of the entry"
     );
     assert!(
-        (f32::from(elbow.right() - header.origin.x) - task_groups::tree_icon_left()).abs() <= 1.0,
-        "elbow arm reaches the entry icon column"
+        (f32::from(elbow.right() - header.origin.x) - (task_groups::tree_icon_left() - 4.0)).abs()
+            <= 1.0,
+        "elbow arm reaches 4px short of the entry icon column"
     );
     assert!(
         (f32::from(sumv.origin.x - header.origin.x) - task_groups::TREE_X_L2).abs() <= 1.0
@@ -624,8 +629,200 @@ fn sidebar_groups_tabs_under_a_collapsible_header(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("sidebar-tab-0").is_some(), "expanding brings the entries back");
 }
 
+/// 分组头分支 chip 的悬浮命中分两级（用户 10-20 裁定）：鼠标在分支名上 →
+/// 完整分支名；同一行其余位置 → 行级「折叠分组」默认。本地组与 SSH 主机下
+/// 的项目子组共用 `render_group_header`，两条入口各验一遍。
 #[gpui::test]
-#[cfg_attr(windows, ignore = "Windows test host font metrics break the grouped-section hairline probe; Linux CI owns this regression")]
+fn sidebar_group_branch_chip_hovers_the_full_branch_name(cx: &mut TestAppContext) {
+    use crate::gpui_shell::terminal::view::TerminalLaunch;
+    use nebula_settings::TabsPositionName;
+    use nebula_split::SplitTree;
+
+    let directory = tempfile::tempdir().unwrap();
+    // 绝对路径指向不存在的程序：绕过 PATH 查找，永不启动真实 shell（同
+    // rename 测试的 fixture）。
+    let missing_shell = directory.path().join("pebrel-test-missing-shell");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let repo_str = repo.to_string_lossy().into_owned();
+    let branch: &'static str = "feature/sidebar-tree-branch-hover";
+    let hub = crate::runtime_api::RuntimeHub::new();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::gpui_shell::init(cx, None);
+        cx.set_global(crate::gpui_shell::config::Settings::load(nebula_settings::ThemeName::Nord));
+        windowing::initialize(cx, hub.clone());
+    });
+    let mut workspace_out = None;
+    let (_, window) = cx.add_window_view(|window, cx| {
+        let workspace = cx.new(|cx| {
+            let mut workspace = NebulaWorkspace::new(
+                window,
+                None,
+                None,
+                1,
+                hub,
+                windowing::WorkspaceStartup::Empty,
+                windowing::WindowRole::Regular,
+                cx,
+            );
+            // 本地组：cwd 成组，项目身份（根+分支）直接进缓存——渲染路径只读
+            // 内存，git 探测只发生在事件路径。
+            let local = workspace.new_pane(
+                (80, 24),
+                TerminalLaunch::Local {
+                    cwd: Some(repo.clone()),
+                    shell: Some(nebula_terminal::tty::Shell::new(
+                        missing_shell.to_string_lossy().into_owned(),
+                        vec![],
+                    )),
+                    shell_name: None,
+                },
+                None,
+                window,
+                cx,
+            );
+            local.view.update(cx, |view, _| {
+                view.cwd = repo_str.clone();
+            });
+            workspace.project_group_cache.insert(
+                repo_str.clone(),
+                task_groups::LocalProject {
+                    root: repo_str.clone().into(),
+                    branch: Some(branch.into()),
+                },
+            );
+            let local_id = local.id;
+            workspace.insert_tab_at(
+                0,
+                WorkspaceTab::Terminal {
+                    panes: vec![local],
+                    tree: SplitTree::leaf(local_id),
+                    focused: local_id,
+                    zoomed: false,
+                    broadcast: false,
+                },
+                TabMeta::default(),
+            );
+            // SSH 组：远端连接在后台必然失败，行模型照常从内存字段派生（同
+            // ssh_sidebar_group_tests 的 fixture）。
+            let ssh = workspace.new_pane(
+                (80, 24),
+                TerminalLaunch::Ssh { destination: "build@example.test".into(), cwd: None },
+                None,
+                window,
+                cx,
+            );
+            ssh.view.update(cx, |view, _| {
+                view.git_root = "/srv/work/pebrel".into();
+                view.cwd = "/srv/work/pebrel".into();
+                view.branch = branch.into();
+            });
+            let ssh_id = ssh.id;
+            workspace.insert_tab_at(
+                1,
+                WorkspaceTab::Terminal {
+                    panes: vec![ssh],
+                    tree: SplitTree::leaf(ssh_id),
+                    focused: ssh_id,
+                    zoomed: false,
+                    broadcast: false,
+                },
+                TabMeta::default(),
+            );
+            workspace
+        });
+        workspace_out = Some(workspace.clone());
+        Root::new(workspace, window, cx)
+    });
+    let workspace = workspace_out.unwrap();
+    // add_window_view 借出的是 &mut VisualTestContext；clone 成持有值再
+    // 作为本测试的驱动句柄（同 open_workspace 的返回形态）。
+    let mut cx = window.clone();
+    cx.simulate_resize(gpui::size(px(1280.0), px(900.0)));
+    enable_agent_sidebar(&mut cx);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.tabs_position = TabsPositionName::Sidebar;
+        workspace.sync_settings_layout(false);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    // GPUI 测试 selector 只收 &'static str；本地组键带临时目录路径，泄漏成
+    // 'static（同 rename fixture 的先例）。
+    let local_chip: &'static str =
+        Box::leak(format!("sidebar-group-branch-{repo_str}").into_boxed_str());
+    let local_name: &'static str =
+        Box::leak(format!("sidebar-group-name-{repo_str}").into_boxed_str());
+    let ssh_chip: &'static str = "sidebar-group-branch-ssh:build@example.test|/srv/work/pebrel";
+
+    // 本地组与 SSH 子组的分支 chip 都渲染（同一渲染函数，两条入口）。
+    let local_chip_bounds = tab_bounds(local_chip, &mut cx);
+    let ssh_chip_bounds = tab_bounds(ssh_chip, &mut cx);
+
+    // tooltip 的默认 500ms 显示延迟走测试虚拟时钟：移动指针 → 推进时钟 →
+    // 泵完任务 → 重画一帧（tooltip 是窗口覆盖层，画帧时才进 debug_bounds）。
+    // advance 传 0 表示按各 tooltip 自己的延迟推进到「该显示的都显示了」。
+    let hover_for = |cx: &mut VisualTestContext,
+                     point: gpui::Point<gpui::Pixels>,
+                     advance: std::time::Duration| {
+        cx.simulate_mouse_move(point, None, Modifiers::default());
+        cx.executor().advance_clock(advance);
+        cx.run_until_parked();
+        redraw(cx);
+    };
+    let hover = |cx: &mut VisualTestContext, point: gpui::Point<gpui::Pixels>| {
+        hover_for(cx, point, std::time::Duration::from_millis(600));
+    };
+
+    // 分支 chip 零延迟：行级 500ms 还没到期，分支名已经直接显示——不会先
+    // 闪一下「折叠分组」再换成分支名（用户 10-20 追加裁定）。
+    hover_for(&mut cx, local_chip_bounds.center(), std::time::Duration::from_millis(100));
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_some(),
+        "the branch tooltip shows immediately, before the row-level delay"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_none(),
+        "the row-level collapse tooltip never preempts the chip"
+    );
+
+    // 两个延迟都过后仍以分支提示为先。
+    hover(&mut cx, local_chip_bounds.center());
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_some(),
+        "hovering the branch chip shows the full-branch tooltip"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_none(),
+        "the row-level collapse tooltip yields to the chip"
+    );
+
+    // 同一行其他位置（项目名）：行级「折叠分组」默认回归，分支提示让位。
+    let name_point = tab_bounds(local_name, &mut cx).center();
+    hover(&mut cx, name_point);
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_none(),
+        "the branch tooltip yields once the pointer leaves the chip"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_some(),
+        "hovering elsewhere on the header keeps the collapse tooltip"
+    );
+
+    // SSH 主机下的项目子组同规则。
+    hover(&mut cx, ssh_chip_bounds.center());
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_some(),
+        "ssh project subgroups share the same branch tooltip"
+    );
+}
+
+#[gpui::test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows test host font metrics break the grouped-section hairline probe; Linux CI owns this regression"
+)]
 fn ai_agent_sidebar_toggle_switches_renderers(cx: &mut TestAppContext) {
     let (_directory, workspace, mut cx) = open_workspace(2, cx);
     click_tab("top-tab-0", &mut cx);
