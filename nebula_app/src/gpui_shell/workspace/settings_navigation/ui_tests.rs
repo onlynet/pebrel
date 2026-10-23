@@ -816,6 +816,31 @@ fn sidebar_group_branch_chip_hovers_the_full_branch_name(cx: &mut TestAppContext
         cx.debug_bounds("sidebar-group-branch-tip").is_some(),
         "ssh project subgroups share the same branch tooltip"
     );
+
+    // 未截断的分支（用户 10-23 需求）：chip **不挂**提示——空提示会占掉
+    // 显示位压住行级默认，必须不挂才是「恢复原样」；行级「折叠分组」
+    // 在 chip 上照常出现。
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.project_group_cache.insert(
+            repo_str.clone(),
+            task_groups::LocalProject {
+                root: repo_str.clone().into(),
+                branch: Some("main".into()),
+            },
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let short_chip_bounds = tab_bounds(local_chip, &mut cx);
+    hover(&mut cx, short_chip_bounds.center());
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_none(),
+        "a branch chip that fits shows no tooltip"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_some(),
+        "the row-level collapse tooltip is restored on a non-truncated chip"
+    );
 }
 
 #[gpui::test]

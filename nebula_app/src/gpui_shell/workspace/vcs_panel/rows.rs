@@ -37,7 +37,7 @@ impl NebulaWorkspace {
     pub(super) fn render_vcs_row(
         &mut self,
         visible_index: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         #[cfg(test)]
@@ -230,22 +230,34 @@ impl NebulaWorkspace {
                             .gap_1()
                             .items_center()
                             .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_size(theme.font_size - px(0.5))
-                                    .child(file_name.clone()),
+                                // 文件名与父目录各自截断（用户 10-23）：真被
+                                // 截断才悬浮展示全文——探针在 layout 时比对
+                                // 全文固有宽与实际可用宽，tooltip 延迟到期
+                                // 才读取；未截断返回空视图，等效没有提示。
+                                // 行内按钮的提示不受影响（独立元素）。
+                                Self::truncation_reveal(
+                                    &format!("vcs-file-name-{section_id}-{index}"),
+                                    file_name.clone(),
+                                    window.text_style().font(),
+                                    theme.font_size - px(0.5),
+                                    "vcs-file-tip",
+                                )
+                                .font_weight(FontWeight::NORMAL),
                             )
                             .when(!parent.is_empty(), |line| {
                                 line.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_size(theme.font_size - px(2.5))
-                                        .text_color(muted)
-                                        .child(parent.clone()),
+                                    Self::truncation_reveal(
+                                        &format!("vcs-parent-{section_id}-{index}"),
+                                        parent.clone(),
+                                        gpui::Font {
+                                            family: theme.mono_font_family.clone(),
+                                            ..window.text_style().font()
+                                        },
+                                        theme.font_size - px(2.5),
+                                        "vcs-path-tip",
+                                    )
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(muted),
                                 )
                             }),
                     )
@@ -438,5 +450,45 @@ impl NebulaWorkspace {
         };
         // 历史行必须首尾相接；通用的 4px 行底留白会把线路切成一段段。
         div().w_full().when(!history, |row| row.pb_1()).child(element).into_any_element()
+    }
+
+    /// 「真被截断才悬浮展示全文」的文本元素：`truncate()` 的 div 内嵌截断
+    /// 探针（layout 时拿实际可用宽比对全文固有宽），悬浮提示在延迟到期
+    /// 才读探针结果——未截断时返回空视图，等效没有提示（用户 10-23
+    /// 需求）。`font`/`font_size` 必须与该 div 最终渲染用的完全一致，探针
+    /// 才量得准；行内其余样式（字重、颜色、字体族）由调用方继续追加。
+    fn truncation_reveal(
+        element_key: &str,
+        text: String,
+        font: gpui::Font,
+        font_size: gpui::Pixels,
+        tip_selector: &'static str,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (truncated, probe) =
+            tab_presentation::truncation_probe(text.clone().into(), font, font_size);
+        let tip_text: SharedString = text.clone().into();
+        let selector_source = element_key.to_owned();
+        div()
+            .id(SharedString::from(element_key.to_owned()))
+            .debug_selector(move || selector_source.clone())
+            .min_w_0()
+            .truncate()
+            .text_size(font_size)
+            .tooltip(move |window, cx| {
+                if truncated.get() {
+                    tab_presentation::tooltip_with_selector(
+                        tip_text.clone(),
+                        tip_selector,
+                        window,
+                        cx,
+                    )
+                } else {
+                    // 空视图什么都不画；这里的行没有行级 tooltip，不会占位
+                    // 压制别的提示（侧栏分支 chip 才需要 build 时不挂）。
+                    cx.new(|_| gpui::Empty).into()
+                }
+            })
+            .child(text)
+            .child(probe)
     }
 }

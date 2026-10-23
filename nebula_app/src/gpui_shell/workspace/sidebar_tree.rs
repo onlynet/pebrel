@@ -160,7 +160,17 @@ impl NebulaWorkspace {
                     .render_ssh_host_header(row_w, row_ix, key, name, *tabs, *collapsed, cx)
                     .into_any_element(),
                 SidebarRow::GroupHeader { key, name, branch, tabs, collapsed } => self
-                    .render_group_header(row_w, row_ix, key, name, branch, *tabs, *collapsed, cx)
+                    .render_group_header(
+                        row_w,
+                        row_ix,
+                        key,
+                        name,
+                        branch,
+                        *tabs,
+                        *collapsed,
+                        window,
+                        cx,
+                    )
                     .into_any_element(),
                 SidebarRow::RecentSectionHeader { count, collapsed } => self
                     .render_recent_section_header(row_w, *count, *collapsed, cx)

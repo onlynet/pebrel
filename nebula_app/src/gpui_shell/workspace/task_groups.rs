@@ -809,6 +809,7 @@ impl NebulaWorkspace {
         branch: &Option<SharedString>,
         tabs: usize,
         collapsed: bool,
+        window: &mut Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = cx.theme();
@@ -903,15 +904,27 @@ impl NebulaWorkspace {
             // 分支块整体在项目名右侧（间隔略大），图标与文字同一前景色。
             // chip 文本截断在 40% 行宽内，长分支读不全：悬浮到 chip 上给完整
             // 分支名，行上其余位置保持行级「折叠分组」默认（用户 10-20
-            // 裁定）。两条规则各有一半靠 gpui 的机制：
+            // 裁定）。真被截断才挂 chip 提示（用户 10-23 需求）：未截断时
+            // 必须**不挂**而不是挂空提示——空提示仍会占掉显示位、压住行级
+            // 默认，就不是「恢复原样」了。两条规则各有一半靠 gpui 的机制：
             // - chip 的 tooltip **零延迟**：指针进 chip 即显示，赶在行级
             //   500ms 延迟到期前占住显示位——否则指针从行内其他位置一路
             //   划进 chip 时，会先闪一下「折叠分组」再换成分支名（用户
             //   10-20 追加裁定：直接展示，不出两级提示的序列）。
             // - 优先级：chip 是行 tooltip 的子元素，prepaint 晚于行、窗口
             //   取最后注册的 tooltip，子级提示盖过行级默认，不必关行 tooltip。
+            // 截断判定在 build 时算：chip 文本可用宽 = 40% 行宽 − 分支图标
+            // − 图标与文本的 3px 间隔（常量都在本函数内），全文固有宽超过
+            // 它才会出省略号；字体用主题默认——chip 文本不覆盖 family，
+            // 继承的是 Root 主题字体。
             .when_some(branch.as_ref(), |row, branch| {
                 let branch_tooltip = branch.clone();
+                let branch_truncated = tab_presentation::text_line_width(
+                    window.text_system(),
+                    branch,
+                    gpui::font(theme.font_family.clone()),
+                    px(label_px * SIDEBAR_TAG_SCALE),
+                ) > px(row_w * 0.4 - GROUP_BRANCH_ICON_SIZE - 3.0);
                 row.child(
                     h_flex()
                         .id(("sidebar-group-branch", row_ix))
@@ -922,14 +935,16 @@ impl NebulaWorkspace {
                         .gap(px(3.0))
                         .items_center()
                         .text_color(theme.warning)
-                        .tooltip_show_delay(std::time::Duration::ZERO)
-                        .tooltip(move |window, cx| {
-                            tab_presentation::tooltip_with_selector(
-                                branch_tooltip.clone(),
-                                "sidebar-group-branch-tip",
-                                window,
-                                cx,
-                            )
+                        .when(branch_truncated, |chip| {
+                            chip.tooltip_show_delay(std::time::Duration::ZERO)
+                                .tooltip(move |window, cx| {
+                                    tab_presentation::tooltip_with_selector(
+                                        branch_tooltip.clone(),
+                                        "sidebar-group-branch-tip",
+                                        window,
+                                        cx,
+                                    )
+                                })
                         })
                         .child(
                             Icon::new(Icon::empty())
