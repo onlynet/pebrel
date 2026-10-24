@@ -628,10 +628,22 @@ fn refresh_overrides_if_needed() {
 /// （Pebrel 的 GPUI 壳分叉）2026-10-12 的回归教训：第一版整段短路导致 agent
 /// 进入后永远显示 Running。键带 manifest 世代，override 变更后整批失效；
 /// 单槽即可（同屏多 pane 各自命中自己的槽位交替，静止场景全是同一键）。
-static IDENTIFY_MEMO: LazyLock<Mutex<Option<(u64, String, Option<AgentKind>)>>> =
-    LazyLock::new(|| Mutex::new(None));
-static DETECT_MEMO: LazyLock<Mutex<Option<(u64, String, String, Option<Detection>)>>> =
-    LazyLock::new(|| Mutex::new(None));
+/// 记忆槽上限：同屏并存的 agent 程序数远小于此；超限（异常形态）整表
+/// 清空重建，不做逐条逐出——宁可少命中，不做错键。
+const MEMO_SLOTS: usize = 8;
+
+/// 按 `(program, screen)` 键的检测记忆（评审 3：单槽在多 pane 交替时互相
+/// 逐出，「同屏多 pane 各自命中」根本不成立——同 agent 的两个 pane 交替
+/// 就是纯逐出）。manifest 世代一变整表作废。
+static DETECT_MEMO: LazyLock<Mutex<(u64, HashMap<(String, String), Option<Detection>>)>> =
+    LazyLock::new(|| Mutex::new((0, HashMap::new())));
+
+/// `identify` 没有 program 维度，键就是屏幕串本身。
+static IDENTIFY_MEMO: LazyLock<Mutex<(u64, HashMap<String, Option<AgentKind>>)>> =
+    LazyLock::new(|| Mutex::new((0, HashMap::new())));
+
+#[cfg(test)]
+static DETECT_MEMO_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Match one live screen snapshot. No match is `None`: callers retain their
 /// higher-confidence hook/process state rather than fabricating idle.
@@ -640,18 +652,22 @@ pub fn detect(program: &str, screen: &str) -> Option<Detection> {
     refresh_overrides_if_needed();
     let generation = manifest_generation();
     {
-        let memo = DETECT_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((memo_generation, memo_program, memo_screen, hit)) = memo.as_ref()
-            && *memo_generation == generation
-            && memo_program == program
-            && memo_screen == screen
-        {
+        let mut memo = DETECT_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if memo.0 != generation {
+            memo.0 = generation;
+            memo.1.clear();
+        } else if let Some(hit) = memo.1.get(&(program.to_owned(), screen.to_owned())) {
+            #[cfg(test)]
+            DETECT_MEMO_HITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return hit.clone();
         }
     }
     let result = detect_from_manifests(agent, screen);
     let mut memo = DETECT_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    *memo = Some((generation, program.to_owned(), screen.to_owned(), result.clone()));
+    if memo.1.len() >= MEMO_SLOTS {
+        memo.1.clear();
+    }
+    memo.1.insert((program.to_owned(), screen.to_owned()), result.clone());
     result
 }
 
@@ -689,17 +705,20 @@ pub fn identify(screen: &str) -> Option<AgentKind> {
     refresh_overrides_if_needed();
     let generation = manifest_generation();
     {
-        let memo = IDENTIFY_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((memo_generation, memo_screen, hit)) = memo.as_ref()
-            && *memo_generation == generation
-            && memo_screen == screen
-        {
+        let mut memo = IDENTIFY_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if memo.0 != generation {
+            memo.0 = generation;
+            memo.1.clear();
+        } else if let Some(hit) = memo.1.get(screen) {
             return *hit;
         }
     }
     let result = identify_from_manifests(screen);
     let mut memo = IDENTIFY_MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    *memo = Some((generation, screen.to_owned(), result));
+    if memo.1.len() >= MEMO_SLOTS {
+        memo.1.clear();
+    }
+    memo.1.insert(screen.to_owned(), result);
     result
 }
 
@@ -804,9 +823,10 @@ impl CompiledGate {
     }
 
     fn matches_with(&self, text: &str, lower: &mut Option<String>) -> bool {
-        self.contains.iter().all(|needle| {
-            lower.get_or_insert_with(|| text.to_lowercase()).contains(needle)
-        }) && self.regex.iter().all(|regex| regex.is_match(text))
+        self.contains
+            .iter()
+            .all(|needle| lower.get_or_insert_with(|| text.to_lowercase()).contains(needle))
+            && self.regex.iter().all(|regex| regex.is_match(text))
             && self.line_regex.iter().all(|regex| text.lines().any(|line| regex.is_match(line)))
             && self.all.iter().all(|gate| gate.matches_with(text, lower))
             && (self.any.is_empty() || self.any.iter().any(|gate| gate.matches_with(text, lower)))
@@ -1133,6 +1153,35 @@ mod tests {
                       \x20 ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents";
         let detection = detect("claude", screen).unwrap();
         assert_eq!(detection.status, AgentStatus::Working, "rule={}", detection.rule_id);
+    }
+
+    /// 评审 3：多 pane 交替（同 agent 两个 pane、各自不同的屏幕）不得互相
+    /// 逐出——单槽记忆下第二次访问永远 miss；按 (program, screen) 键后，
+    /// 交替访问各自命中。
+    #[test]
+    fn alternating_pane_screens_keep_their_own_memo_slots() {
+        let idle_screen = "✻ Baked for 15m 24s
+                      ────────────────────────────────────────
+                      ❯ 
+                      ────────────────────────────────────────
+                        ⏸ manual mode on · ? for shortcuts · ← for agents";
+        let working_screen = "  ⎿  Running…
+                      ✶ Moseying… (8m 42s · ↓ 18.3k tokens)
+                      ────────────────────────────────────────
+                      ❯ 
+                      ────────────────────────────────────────
+                        ⏵⏵ bypass permissions on (shift+tab to cycle)";
+        super::DETECT_MEMO_HITS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let a1 = detect("claude", idle_screen);
+        let b1 = detect("claude", working_screen);
+        let a2 = detect("claude", idle_screen);
+        let b2 = detect("claude", working_screen);
+        assert_eq!(a1, a2);
+        assert_eq!(b1, b2);
+        assert!(
+            super::DETECT_MEMO_HITS.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "alternating panes must hit their own memo slots"
+        );
     }
 
     #[test]

@@ -108,6 +108,14 @@ fn window_minimized(_window: &Window) -> bool {
     false
 }
 
+/// 定时回调拿不到 `Window`，但 armed 链在 arm 时捕获了原生句柄——每个
+/// tick 直接问平台「窗口是否最小化」（实现住在 `platform::quick_window`，
+/// 平台 cfg 记在豁免目录）。补上的空窗：最小化后 render 停摆，render 侧的
+/// offscreen 探测不再跑，armed 链只能自证观众还在不在。
+fn native_window_minimized(hwnd: isize) -> bool {
+    crate::platform::quick_window::window_minimized_by_handle(hwnd)
+}
+
 /// 相位按真实时间推进（0.8s 一圈）：定时链的节奏与显示刷新解耦后，动画
 /// 速度不变——步进慢了只是采样点变稀。
 fn advance_spinner_phase(phase: f32, delta: std::time::Duration) -> f32 {
@@ -129,9 +137,11 @@ impl NebulaWorkspace {
     ///
     /// 断链判据是「像素到不了屏幕」而不是「窗口没聚焦」：一边看 Agent 跑、
     /// 一边在浏览器或编辑器里干活，正是这个转圈唯一的用武之地；失焦即冻结
-    /// 会让它在最需要的场景里失效。定时回调拿不到 `Window`，托盘隐藏由
-    /// tick 自己查（`window_hidden` 是字段），最小化探测只能在 render 侧做：
-    /// 这里发现 offscreen 就抬世代号掀掉在途链。
+    /// 会让它在最需要的场景里失效。定时回调拿不到 `Window`：托盘隐藏由
+    /// tick 查 `window_hidden` 字段，最小化由 tick 用 arm 时捕获的原生句柄
+    /// 每 tick 复查（`native_window_minimized`——最小化后 render 停摆，
+    /// 不能只靠 render 侧的 offscreen 探测）；render 侧发现 offscreen 则
+    /// 抬世代号掀掉在途链。
     pub(super) fn arm_activity_spinner_frame(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.spinner_tick_armed.get() || !self.spinner_visible.get() {
             return;
@@ -143,6 +153,8 @@ impl NebulaWorkspace {
         }
         self.spinner_tick_armed.set(true);
         let epoch = self.spinner_chain_epoch.get();
+        // 句柄在 arm 时捕获：tick 里用它复查最小化（见 `native_window_minimized`）。
+        let native_hwnd = super::windowing::native_hwnd(window).map(|hwnd| hwnd as isize);
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             loop {
@@ -152,6 +164,7 @@ impl NebulaWorkspace {
                         if workspace.spinner_chain_epoch.get() != epoch
                             || !workspace.spinner_visible.get()
                             || workspace.window_hidden
+                            || native_hwnd.is_some_and(native_window_minimized)
                         {
                             workspace.spinner_tick_armed.set(false);
                             return false;
