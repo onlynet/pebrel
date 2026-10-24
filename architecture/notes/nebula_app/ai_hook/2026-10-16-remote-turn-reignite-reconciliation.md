@@ -53,6 +53,17 @@
   Running 且身份保留）。
 - Supersedes: 2026-10-12-remote-turn-stall-reconciliation.md（收敛方向与
   全部防线保留，本 note 补齐反方向并接管其语义）。
+- 评审修正（2026-10-24，#674 维护者反例）：
+  1. 嵌套 shell 的 OSC 7 弱边不再凭 cwd 上报直接清弱推断的运行态——OSC 7
+     只是目录信号，运行中的命令同样能发（`bash -c 'printf OSC7; sleep 60'`）。
+     清运行态必须等进程树证据：pane 进程树只剩交互 shell（根进程或嵌套
+     shell）；任何命令子进程否决。SSH pane 的进程树在远端，维持提示符渲染
+     推断（已知边界）。
+  2. 对账收敛 Done/Idle 记为**推断**完成：去重护栏只拦权威完成的重放，
+     同 turn 的迟到真 TurnDone 被采纳，成败与通知落地（失败收敛 Idle 而非
+     Ready）。
+  3. `pending_submit` 屏障只活到停滞阈值：提交与后续 hook 全部丢失时，
+     第一拍停滞使屏障过期（样本归零），两拍稳定形态防线照常双向起作用。
 - Revisit when: 远端 bridge 改为可靠传输（排队/重试）后，两向对账可一起
   退役或收紧阈值；working 检测规则若出现新误判形态（如 IDE 集成屏），优
   先加固规则而不是加计时。

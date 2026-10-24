@@ -39,6 +39,10 @@ pub(crate) struct AgentActivity {
     working_samples: u8,
     turn_observed: bool,
     pending_submit: bool,
+    /// 屏幕停滞对账推断的完成（Done/Idle）标记。推断不是权威：同 turn 的
+    /// 迟到真 TurnDone 仍要被采纳（补真实的成败与通知），去重护栏只拦
+    /// 权威完成的重放。任何被采纳的 hook 事件与命令边界都会清掉它。
+    inferred_done: bool,
     /// A completion-only hook latches its result until an idle screen or an
     /// explicit submission separates the old frame from a new turn.
     screen_armed: bool,
@@ -63,6 +67,7 @@ impl Default for AgentActivity {
             working_samples: 0,
             turn_observed: false,
             pending_submit: false,
+            inferred_done: false,
             screen_armed: true,
             command_ended: false,
             native_codex: false,
@@ -176,6 +181,7 @@ impl AgentActivity {
             && self.status == AgentStatus::Done
             && event.turn_id.is_some()
             && event.turn_id == self.turn_id
+            && !self.inferred_done
         {
             return false;
         }
@@ -258,6 +264,7 @@ impl AgentActivity {
             self.turn_id = event.turn_id.clone();
         }
         self.command_ended = false;
+        self.inferred_done = false;
         if event.kind == AiHookKind::SessionEnd {
             self.command_finished();
             return true;
@@ -405,7 +412,18 @@ impl AgentActivity {
         if self.allows_screen() {
             return false;
         }
-        if !stalled || self.pending_submit {
+        if !stalled {
+            self.idle_samples = 0;
+            self.working_samples = 0;
+            return false;
+        }
+        if self.pending_submit {
+            // 提交屏障防的是「上一帧的 idle 屏幕把刚提交的回合立刻判完成」，
+            // 它只活到停滞阈值：提交后 hook 全程静默超过阈值（PromptSubmit
+            // 与后续事件在 bridge 上全部丢失）时屏障过期，屏幕证据恢复话语
+            // 权。本拍只过期屏障并把两向计数归零——收敛/点火仍需其后连续
+            // 两拍稳定形态，不因过期而即时定论。
+            self.pending_submit = false;
             self.idle_samples = 0;
             self.working_samples = 0;
             return false;
@@ -448,6 +466,9 @@ impl AgentActivity {
         self.status = next;
         self.source = AgentStatusSource::Screen;
         self.rule = Some(detection.rule_id.clone());
+        // 收敛为 Done/Idle 是**推断**完成（点火 Working 则推翻旧推断）：
+        // 迟到的同 turn 真 TurnDone 不受去重护栏拦截（见 `accepts_hook`）。
+        self.inferred_done = matches!(next, AgentStatus::Done | AgentStatus::Idle);
         self.idle_samples = 0;
         self.working_samples = 0;
         true

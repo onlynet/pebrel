@@ -191,22 +191,112 @@ fn cwd_report_finishes_a_command_inside_an_unintegrated_nested_shell(cx: &mut Te
         view.suggest.last_committed = "cd /cygdrive/d/project".into();
         view.mark_command_running();
         assert_eq!(view.sidebar_activity(), SidebarActivity::Running);
-        // fish 画下一个提示符时的 OSC 7 上报 → 命令结束。
+        // fish 画下一个提示符时的 OSC 7 上报：cwd 信号本身不是完成证据，
+        // 只排程进程树探测，运行态当场必须维持。
         view.process_event(TermEvent::CwdReport("/cygdrive/d/project".into()), cx);
+        assert!(view.command_running, "OSC 7 alone is a cwd signal, not completion");
+        assert_eq!(view.cwd, "/cygdrive/d/project", "the report still updates the cwd");
+        // 进程树只剩交互 shell（bash 根 + 接管的 fish）→ 回到提示符，清运行态。
+        let at_prompt = vec![
+            crate::process_tree::ProcessEntry {
+                pid: 1,
+                parent_pid: 0,
+                depth: 0,
+                executable: "bash.exe".into(),
+            },
+            crate::process_tree::ProcessEntry {
+                pid: 2,
+                parent_pid: 1,
+                depth: 1,
+                executable: "fish.exe".into(),
+            },
+        ];
+        let started = view.command_started;
+        view.apply_osc7_prompt_evidence(started, Ok(at_prompt), cx);
         assert!(!view.command_running);
         assert!(view.command_started.is_none());
         assert_eq!(view.sidebar_activity(), SidebarActivity::Idle);
-        assert_eq!(view.cwd, "/cygdrive/d/project", "the report still updates the cwd");
         // 已被进程反证/完成的命令不受影响；hook 拥有的 agent 回合不走这条弱边。
         view.handle_ai_hook(&hook("osc7-not-mine", "UserPromptSubmit", 1), cx);
         view.mark_command_running();
         assert_eq!(view.sidebar_activity(), SidebarActivity::Running);
         view.process_event(TermEvent::CwdReport("/cygdrive/d/other".into()), cx);
+        let started = view.command_started;
+        view.apply_osc7_prompt_evidence(
+            started,
+            Ok(vec![crate::process_tree::ProcessEntry {
+                pid: 1,
+                parent_pid: 0,
+                depth: 0,
+                executable: "bash.exe".into(),
+            }]),
+            cx,
+        );
         assert_eq!(
             view.sidebar_activity(),
             SidebarActivity::Running,
             "a hook-owned turn ignores the weak OSC 7 edge"
         );
+    });
+}
+
+/// 运行中的命令自己发出的 OSC 7 不是完成证据（评审反例：
+/// `bash -c 'printf "]7;file://localhost/tmp"; sleep 60'`）——
+/// 进程树里 sleep 还在，弱推断的运行态必须保持。
+#[gpui::test]
+fn a_running_command_emitting_osc7_does_not_finish_itself(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx);
+    view.update(window, |view, cx| {
+        view.suggest.last_committed = "bash -c 'printf osc7; sleep 60'".into();
+        view.mark_command_running();
+        assert_eq!(view.sidebar_activity(), SidebarActivity::Running);
+        // 命令运行中上报了一个目录。
+        view.process_event(TermEvent::CwdReport("/tmp".into()), cx);
+        assert!(view.command_running, "the cwd report alone changes nothing");
+        // 进程树：根 shell → bash -c → sleep —— 存在非 shell 子进程，否决。
+        let command_running_tree = vec![
+            crate::process_tree::ProcessEntry {
+                pid: 1,
+                parent_pid: 0,
+                depth: 0,
+                executable: "bash.exe".into(),
+            },
+            crate::process_tree::ProcessEntry {
+                pid: 2,
+                parent_pid: 1,
+                depth: 1,
+                executable: "bash.exe".into(),
+            },
+            crate::process_tree::ProcessEntry {
+                pid: 3,
+                parent_pid: 2,
+                depth: 2,
+                executable: "sleep.exe".into(),
+            },
+        ];
+        let started = view.command_started;
+        view.apply_osc7_prompt_evidence(started, Ok(command_running_tree), cx);
+        assert!(view.command_running, "a live command child vetoes the prompt inference");
+        assert_eq!(view.sidebar_activity(), SidebarActivity::Running);
+        // sleep 退出后同样的上报才构成回到提示符的证据。
+        let at_prompt = vec![
+            crate::process_tree::ProcessEntry {
+                pid: 1,
+                parent_pid: 0,
+                depth: 0,
+                executable: "bash.exe".into(),
+            },
+            crate::process_tree::ProcessEntry {
+                pid: 2,
+                parent_pid: 1,
+                depth: 1,
+                executable: "fish.exe".into(),
+            },
+        ];
+        let started = view.command_started;
+        view.apply_osc7_prompt_evidence(started, Ok(at_prompt), cx);
+        assert!(!view.command_running);
+        assert_eq!(view.sidebar_activity(), SidebarActivity::Idle);
     });
 }
 

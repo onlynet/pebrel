@@ -23,6 +23,12 @@ fn event(source: &str, session: &str, name: &str) -> AiHookEvent {
     parse_remote_envelope(wire.as_bytes(), Some(1)).unwrap()
 }
 
+fn event_with_turn(source: &str, session: &str, name: &str, turn: &str) -> AiHookEvent {
+    let mut event = event(source, session, name);
+    event.turn_id = Some(turn.to_owned());
+    event
+}
+
 fn screen(status: AgentStatus) -> Option<Detection> {
     Some(Detection { agent: AgentKind::Codex, status, rule_id: "test.chrome".into() })
 }
@@ -351,14 +357,90 @@ fn stall_reconciliation_yields_to_screen_authority_and_reads_turn_observed() {
 fn stall_reconciliation_honors_the_pending_submit_barrier() {
     let mut activity = AgentActivity::default();
     activity.apply_hook(&event("claude", "pending", "UserPromptSubmit"));
-    activity.backdate_hook_for_test(std::time::Duration::from_secs(60));
     activity.submitted();
     assert_eq!(activity.status(), AgentStatus::Working);
+    // hook 时间线仍在滚动（未停滞）：屏障绝对在，屏幕证据一律不算。
     for _ in 0..4 {
-        assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
-        assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Working).as_ref(), true));
+        assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), false));
+        assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Working).as_ref(), false));
     }
     assert_eq!(activity.status(), AgentStatus::Working);
+}
+
+/// 提交屏障的恢复边界（评审 3）：提交后 PromptSubmit 与后续 hook 在远端
+/// bridge 上全部丢失时，屏障只活到停滞阈值——过期后屏幕证据恢复话语权，
+/// 收敛/点火仍需连续两拍稳定形态（不会因过期而瞬时定论）。
+#[test]
+fn pending_submit_barrier_expires_once_hooks_stay_silent_past_the_stall() {
+    let mut activity = AgentActivity::default();
+    activity.apply_hook(&event("claude", "lost-submit", "UserPromptSubmit"));
+    activity.backdate_hook_for_test(std::time::Duration::from_secs(21));
+    activity.submitted();
+    assert_eq!(activity.status(), AgentStatus::Working);
+    // 第一拍停滞：屏障过期本拍不定论，两向计数归零。
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    // 交替形态依旧不积累。
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Working).as_ref(), true));
+    // 连续两拍 idle 收敛：submitted 已记 turn_observed，落 Done 而非 Idle。
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert!(activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert_eq!(activity.status(), AgentStatus::Done);
+    assert_eq!(activity.source(), AgentStatusSource::Screen);
+}
+
+/// 屏障过期后的反方向（评审 3 的镜像）：提交链路整体丢失、屏幕先持续转圈
+/// （状态本就 Working，点火无状态沿），随后屏幕回到 idle——屏障不得挡住
+/// 这条收敛路径。
+#[test]
+fn expired_submit_barrier_lets_a_later_idle_screen_settle() {
+    let mut activity = AgentActivity::default();
+    activity.apply_hook(&event("claude", "lost-submit-2", "UserPromptSubmit"));
+    activity.backdate_hook_for_test(std::time::Duration::from_secs(21));
+    activity.submitted();
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Working).as_ref(), true));
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Working).as_ref(), true));
+    assert_eq!(activity.status(), AgentStatus::Working);
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert!(activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert_eq!(activity.status(), AgentStatus::Done);
+    assert_eq!(activity.source(), AgentStatusSource::Screen);
+}
+
+/// 推断完成的补正（评审 2）：停滞对账收敛 Done 后 turn_id 仍在，同 turn
+/// 的迟到真 TurnDone 不被去重护栏拦截——成功的真实结果与失败通知都能落地；
+/// 权威 TurnDone 之后的重放才被拦。
+#[test]
+fn late_authoritative_turn_done_supersedes_an_inferred_done() {
+    let mut activity = AgentActivity::default();
+    activity.apply_hook(&event_with_turn("claude", "t", "UserPromptSubmit", "t-9"));
+    activity.backdate_hook_for_test(std::time::Duration::from_secs(21));
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert!(activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert_eq!(activity.status(), AgentStatus::Done, "inferred by the screen");
+    // 迟到的成功 TurnDone：被采纳，来源翻正为 hook。
+    assert!(activity.apply_hook(&event_with_turn("claude", "t", "Stop", "t-9")));
+    assert_eq!(activity.status(), AgentStatus::Done);
+    assert_eq!(activity.source(), AgentStatusSource::Hook);
+    // 权威完成后的同 turn 重放照旧被去重护栏拦下。
+    assert!(!activity.apply_hook(&event_with_turn("claude", "t", "Stop", "t-9")));
+}
+
+/// 推断完成的失败补正（评审 2 失败半边）：迟到的失败 TurnDone 把状态收敛
+/// 为 Idle 语义（失败不是「完成待命」），事件本身被采纳。
+#[test]
+fn late_failed_turn_done_supersedes_an_inferred_done() {
+    let mut activity = AgentActivity::default();
+    activity.apply_hook(&event_with_turn("claude", "f", "UserPromptSubmit", "f-1"));
+    activity.backdate_hook_for_test(std::time::Duration::from_secs(21));
+    assert!(!activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert!(activity.reconcile_stalled_turn(screen(AgentStatus::Idle).as_ref(), true));
+    assert_eq!(activity.status(), AgentStatus::Done);
+    let mut failed = event_with_turn("claude", "f", "Stop", "f-1");
+    failed.turn_outcome = crate::ai_hook::AiTurnOutcome::Failed;
+    assert!(activity.apply_hook(&failed));
+    assert_eq!(activity.status(), AgentStatus::Idle, "a failed turn is not a ready turn");
+    assert_eq!(activity.source(), AgentStatusSource::Hook);
 }
 
 /// 对账的反方向：UserPromptSubmit 在远端 bridge 丢失（通道锁 busy/超时/超限）

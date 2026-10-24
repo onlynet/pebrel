@@ -754,22 +754,20 @@ impl TerminalView {
                     cx.notify();
                 }
                 // 无集成的嵌套交互 shell（Cygwin fish、MSYS bash…）没有
-                // 133;D 完成边：Enter 提交靠弱推断标记运行中，而接管终端的
-                // shell 永远等不到宿主 shell 的 133;D，转圈就此挂死（用户
-                // 10-10「进入 fish 后一直 Running」）。OSC 7 恰好随这类 shell
-                // 的每次提示符渲染到达——那正是「命令结束、回到提示符」的
-                // 事实。带集成的 shell 先收到 133;D，这里只是幂等兜底；hook
-                // 拥有的 agent 会话不走这条弱边。
+                // 133;D 完成边：Enter 提交靠弱推断标记运行中。OSC 7 随这类
+                // shell 的每次提示符渲染到达，是「回到提示符」的候选证据——
+                // 但 OSC 7 本身只是 cwd 信号，运行中的命令同样能发它
+                // （`bash -c 'printf OSC7; sleep 60'`）。清运行态必须等进程树
+                // 证据：pane 进程树里只剩交互 shell（无命令子进程）才算回到
+                // 提示符；证据在途期间维持运行态。带集成的 shell 先收到
+                // 133;D，这条弱边只是兜底；hook 拥有的 agent 会话不走它。
+                // SSH pane 的进程树在远端，本地看不见命令子进程——该形态
+                // 维持提示符渲染推断（远端进程可见性是已知边界，见 note）。
                 if self.command_running
                     && !self.command_running_disproved
                     && !self.agent_activity.hook_seen()
                 {
-                    self.command_running = false;
-                    self.command_started = None;
-                    self.last_process_probe = None;
-                    self.prompt_process_probe = None;
-                    self.last_prompt_process_probe = None;
-                    cx.notify();
+                    self.probe_osc7_prompt_evidence(cx);
                 }
             },
             TermEvent::InlineImage { data, abs_line, width, height } => {
