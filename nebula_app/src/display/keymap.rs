@@ -952,6 +952,10 @@ mod tests {
             assert!(READONLY_ROWS[0].2.contains("Ctrl+1"));
             assert!(!GPUI.readonly_rows()[0].2.contains("Ctrl+1"));
             assert_eq!(GPUI.effective_combo(&Action::Quit, &[]), Some(("Command+Q".into(), false)));
+            assert_eq!(GPUI.effective_combo(&Action::Minimize, &[]), Some(("Command+M".into(), false)));
+        } else {
+            // 其他平台无默认最小化键；用户仍可 keybind= 自配（适配臂跨平台）。
+            assert_eq!(GPUI.effective_combo(&Action::Minimize, &[]), None);
         }
     }
 

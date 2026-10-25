@@ -83,6 +83,15 @@ mod macos_command_keys {
                 }
             }
         }
+        // ⌘M 在终端上下文也必须派发最小化，不得被编码进 PTY。
+        for context in ["Root", crate::gpui_shell::terminal::KEY_CONTEXT] {
+            let contexts = [KeyContext::parse(context).unwrap()];
+            let input = [Keystroke::parse("cmd-m").unwrap()];
+            let (bindings, pending) = keymap.bindings_for_input(&input, &contexts);
+            assert!(!pending);
+            let action = bindings.first().expect("⌘M 必须有明确动作").action();
+            assert!(action.as_any().is::<MinimizeWindow>(), "{context}");
+        }
     }
 
     /// #238：⌘K 被解绑后，用户注入的 NoAction 必须压得住静态默认绑定。
@@ -946,5 +955,23 @@ mod dispatch {
                 }
             });
         }
+    }
+
+    /// ⌘M 走完整键盘派发链：注册平台门控与 ⌘K 同规（仅 macOS 运行时）。
+    /// 测试平台的 minimize 是 no-op，用 App 级拦截器验证动作确实派发到位。
+    #[gpui::test]
+    fn command_minimize_dispatches_only_on_macos(cx: &mut TestAppContext) {
+        let (_directory, _workspace, mut cx) = open_workspace(1, cx);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = seen.clone();
+        cx.update(|_, cx| {
+            cx.on_action(move |_: &MinimizeWindow, _| flag.set(true));
+        });
+        press("cmd-m", &mut cx);
+        assert_eq!(
+            seen.get(),
+            is_macos(),
+            "⌘M 只应在 macOS 注册并派发 MinimizeWindow"
+        );
     }
 }
