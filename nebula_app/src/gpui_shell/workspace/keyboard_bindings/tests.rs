@@ -50,6 +50,14 @@ mod macos_command_keys {
         let quit = workspace_binding_in_context("cmd+q", &crate::config::Action::Quit, None)
             .expect("⌘Q 必须有绑定");
         assert!(quit.action().as_any().is::<QuitApp>(), "⌘Q 必须绑定 QuitApp");
+        // ⌘M 最小化：必须落到窗口动作，而不是掉进 `_ => None` 变成表外影子绑定。
+        let minimize =
+            workspace_binding_in_context("cmd+m", &crate::config::Action::Minimize, None)
+                .expect("⌘M 必须有绑定");
+        assert!(
+            minimize.action().as_any().is::<MinimizeWindow>(),
+            "⌘M 必须绑定 MinimizeWindow"
+        );
     }
 
     #[test]

@@ -173,6 +173,7 @@ pub(crate) const MACOS_COMMAND_ALIASES: &[(&str, Action)] = &[
     ("cmd+v", Action::Paste),
     ("ctrl+cmd+f", Action::ToggleFullscreen),
     ("shift+cmd+o", Action::OpenQuickJump),
+    ("cmd+m", Action::Minimize),
     ("cmd+q", Action::Quit),
 ];
 

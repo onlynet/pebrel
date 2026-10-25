@@ -278,6 +278,8 @@ fn workspace_binding_in_context(
             scope.or(Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
         )),
         Action::ToggleFullscreen => Some(KeyBinding::new(&combo, ToggleFullscreen, scope)),
+        // ⌘M 最小化当前窗口：视图处理器调 gpui 的 minimize_window。
+        Action::Minimize => Some(KeyBinding::new(&combo, MinimizeWindow, scope)),
         Action::OpenQuickJump => Some(KeyBinding::new(&combo, OpenQuickJump, scope)),
         // macOS 的退出键走与托盘退出同一条路径：先落盘会话与草稿，再停 PTY。
         Action::Quit => Some(KeyBinding::new(&combo, QuitApp, scope)),
