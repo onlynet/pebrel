@@ -146,7 +146,6 @@ gpui::actions!(
         CopySelection,
         PasteClipboard,
         ToggleFullscreen,
-        MinimizeWindow,
         OpenQuickJump
     ]
 );

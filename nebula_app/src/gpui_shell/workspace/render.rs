@@ -1,5 +1,6 @@
 //! Root composition and transient overlays; workspace state remains in the parent.
 use super::*;
+use super::keyboard_bindings::MinimizeWindow;
 
 impl Render for NebulaWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

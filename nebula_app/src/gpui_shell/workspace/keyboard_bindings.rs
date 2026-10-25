@@ -202,6 +202,13 @@ pub(super) struct SelectTab {
 #[action(namespace = nebula_workspace, no_json)]
 pub(super) struct QuitApp;
 
+/// 最小化当前窗口，macOS 上绑 ⌘M（`Action::Minimize` 的 GPUI 侧落点）。
+/// 与 QuitApp 同式：动作与其绑定适配臂同处维护；新动作不再进根文件的
+/// actions! 列表，workspace.rs 的行数棘轮得以保持基线。
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = nebula_workspace, no_json)]
+pub(super) struct MinimizeWindow;
+
 impl SelectTab {
     fn from_config(action: &crate::config::Action) -> Option<Self> {
         use crate::config::Action;
