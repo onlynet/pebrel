@@ -22,6 +22,49 @@ fn win32_input_mode_tracks_decset_9001() {
     assert!(!term.mode().contains(TermMode::WIN32_INPUT_MODE));
 }
 
+/// 渲染世代的覆盖合同：一切**内容**突变（可打印写入、CSI damage 标记、
+/// resize、alt-screen 互换）必须递增；纯读取与 `reset_damage` 的消费不
+/// 递增。快照缓存键以它为「网格变没变」的唯一信号——漏一个突变点就是把
+/// 新内容冻在旧帧里的渲染事故（设计见
+/// architecture/notes/nebula_app/gpui_shell/terminal/
+/// 2026-10-12-render-snapshot-generation-cache.md）。
+#[test]
+fn render_generation_advances_on_content_mutations_only() {
+    let size = TermSize::new(5, 5);
+    let mut term = Term::new(Config::default(), &size, VoidListener);
+    let baseline = term.render_generation();
+
+    // 纯读取不变。
+    let _ = term.grid().cursor.point;
+    let _ = term.damage();
+    assert_eq!(term.render_generation(), baseline, "reads must not bump the generation");
+
+    // 普通可打印写入（不标 damage 的那条路）必须递增。
+    term.write_at_cursor('a');
+    assert!(term.render_generation() > baseline, "printable writes must bump the generation");
+
+    // CSI 行编辑类 damage 标记（回车）递增。
+    let before = term.render_generation();
+    term.carriage_return();
+    assert!(term.render_generation() > before, "damage-marked handlers must bump");
+
+    // resize 递增。
+    let before = term.render_generation();
+    let resized = TermSize::new(8, 8);
+    term.resize(resized);
+    assert!(term.render_generation() > before, "resize must bump");
+
+    // alt-screen 互换递增。
+    let before = term.render_generation();
+    term.swap_alt();
+    assert!(term.render_generation() > before, "alt-screen swap must bump");
+
+    // reset_damage 是消费，不是突变。
+    let before = term.render_generation();
+    term.reset_damage();
+    assert_eq!(term.render_generation(), before, "damage consumption must not bump");
+}
+
 /// 记录 `Event::PtyWrite` 的监听器：`send_event` 只拿 `&self`，所以要内部
 /// 可变性。只留 PtyWrite——2031 的断言只关心回写 PTY 的字节。
 #[derive(Clone, Default)]

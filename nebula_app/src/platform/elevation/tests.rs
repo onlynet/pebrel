@@ -1,5 +1,21 @@
 use super::*;
 
+/// 隔离真值表：只有「进程提升而桌面 shell 非提升」才隔离。
+///
+/// Administrator 桌面会话（UAC Admin Approval Mode 关闭，explorer 与一切
+/// 进程同为提升）必须放行——否则会话保存整体静默失效，恢复功能在那种
+/// 机器上永久不可用。UAC runas 的提权窗口（进程 High、桌面 Medium）保持
+/// 隔离，这是该判定的原始意图；查询不到桌面 shell 时按非提升回退，
+/// 等价于旧的仅看进程语义。
+#[test]
+fn only_a_privilege_mismatch_with_the_desktop_isolates() {
+    assert!(!isolate(true, Some(true)), "管理员桌面会话：两边都提升，不隔离");
+    assert!(isolate(true, Some(false)), "UAC runas：进程提升、桌面非提升，隔离");
+    assert!(!isolate(false, Some(false)), "普通启动永不隔离");
+    assert!(!isolate(false, None), "无桌面会话里的普通进程不隔离");
+    assert!(isolate(true, None), "无桌面会话时保守回退到旧语义");
+}
+
 #[test]
 fn launch_arguments_target_pebrel_cli_and_preserve_selected_shell() {
     let shell_args = vec!["--literal".into(), "$(value); `echo nope`".into()];
