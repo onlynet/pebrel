@@ -112,8 +112,14 @@ fn window_minimized(_window: &Window) -> bool {
 /// tick 直接问平台「窗口是否最小化」（实现住在 `platform::quick_window`，
 /// 平台 cfg 记在豁免目录）。补上的空窗：最小化后 render 停摆，render 侧的
 /// offscreen 探测不再跑，armed 链只能自证观众还在不在。
+#[cfg(windows)]
 fn native_window_minimized(hwnd: isize) -> bool {
     crate::platform::quick_window::window_minimized_by_handle(hwnd)
+}
+
+#[cfg(not(windows))]
+fn native_window_minimized(_hwnd: isize) -> bool {
+    false
 }
 
 /// 相位按真实时间推进（0.8s 一圈）：定时链的节奏与显示刷新解耦后，动画
