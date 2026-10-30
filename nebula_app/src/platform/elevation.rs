@@ -18,13 +18,19 @@ pub(crate) mod handover;
 /// 管理员桌面会话正常保存/恢复；普通账户下 UAC runas 打开的提权窗口
 /// 仍不覆盖普通工作区（原始设计意图）。
 pub(crate) fn requires_isolation() -> bool {
-    isolate(is_elevated().unwrap_or(true), desktop_shell_elevated())
+    isolate(is_elevated().map_err(|_| ()), desktop_shell_elevated())
 }
 
-/// 真值表核心，独立成函数供单测。`None` 表示查询不到桌面 shell（SSH/
-/// 服务会话），按非提升处理：保守回退到旧的仅看进程语义。
-fn isolate(process_elevated: bool, desktop_shell: Option<bool>) -> bool {
-    process_elevated && !desktop_shell.unwrap_or(false)
+/// 真值表核心，独立成函数供单测。进程侧入参是**查询结果**（含失败）：
+/// token 查询失败是「未知」而非「非提升」，不得进入与桌面 shell 的合成
+/// 判定——桌面提升不能洗白一个状态未知的进程（失败同样可能发生在真正的
+/// runas 提权进程上），fail-closed 直接隔离。`None` 表示查询不到桌面
+/// shell（SSH/服务会话），按非提升处理：保守回退到旧的仅看进程语义。
+fn isolate(process_elevated: Result<bool, ()>, desktop_shell: Option<bool>) -> bool {
+    match process_elevated {
+        Err(()) => true,
+        Ok(elevated) => elevated && !desktop_shell.unwrap_or(false),
+    }
 }
 
 /// 桌面 shell（explorer.exe）是否提升。结果进程内缓存：token 不随运行

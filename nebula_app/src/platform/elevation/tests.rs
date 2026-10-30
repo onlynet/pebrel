@@ -1,6 +1,6 @@
 use super::*;
 
-/// 隔离真值表：只有「进程提升而桌面 shell 非提升」才隔离。
+/// 隔离真值表：只有「进程**确认**提升而桌面 shell 非提升」才隔离。
 ///
 /// Administrator 桌面会话（UAC Admin Approval Mode 关闭，explorer 与一切
 /// 进程同为提升）必须放行——否则会话保存整体静默失效，恢复功能在那种
@@ -9,11 +9,22 @@ use super::*;
 /// 等价于旧的仅看进程语义。
 #[test]
 fn only_a_privilege_mismatch_with_the_desktop_isolates() {
-    assert!(!isolate(true, Some(true)), "管理员桌面会话：两边都提升，不隔离");
-    assert!(isolate(true, Some(false)), "UAC runas：进程提升、桌面非提升，隔离");
-    assert!(!isolate(false, Some(false)), "普通启动永不隔离");
-    assert!(!isolate(false, None), "无桌面会话里的普通进程不隔离");
-    assert!(isolate(true, None), "无桌面会话时保守回退到旧语义");
+    assert!(!isolate(Ok(true), Some(true)), "管理员桌面会话：两边都提升，不隔离");
+    assert!(isolate(Ok(true), Some(false)), "UAC runas：进程提升、桌面非提升，隔离");
+    assert!(!isolate(Ok(false), Some(false)), "普通启动永不隔离");
+    assert!(!isolate(Ok(false), None), "无桌面会话里的普通进程不隔离");
+    assert!(isolate(Ok(true), None), "无桌面会话时保守回退到旧语义");
+}
+
+/// 进程 token 查询失败：未知即按提升处理（fail-closed），且**不得**进入
+/// 与桌面 shell 的合成判定——桌面提升不能洗白状态未知的进程（失败同样
+/// 可能发生在真正的 runas 提权进程上）。错误路径与上面的成功查询真值表
+/// 分开锁定（维护者 2026-10-28 review 裁定）。
+#[test]
+fn a_failed_process_token_query_isolates_regardless_of_the_desktop() {
+    assert!(isolate(Err(()), Some(true)), "查询失败 + 管理员桌面：仍隔离");
+    assert!(isolate(Err(()), Some(false)), "查询失败 + 普通桌面：仍隔离");
+    assert!(isolate(Err(()), None), "查询失败 + 无桌面会话：仍隔离");
 }
 
 #[test]

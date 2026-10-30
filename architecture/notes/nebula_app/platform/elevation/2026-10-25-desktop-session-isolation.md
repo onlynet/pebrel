@@ -51,6 +51,16 @@ compares against `SECURITY_MANDATORY_HIGH_RID`; results are cached in a
 `OnceLock` because tokens do not change during a process lifetime and the
 predicate sits on every persistence path.
 
+A failed **process** token query stays fail-closed and does not enter the
+mismatch composition at all: `is_elevated()` returning `Err` isolates
+unconditionally, regardless of what the desktop shell query observed. Folding
+the error into `unwrap_or(true)` and composing anyway (the first draft) would
+let an observed-elevated desktop clear an *unknown* process — the failure can
+just as well happen on a genuinely elevated `runas` process, and an unknown
+process must not reach the persistence plane (maintainer review, 2026-10-28).
+The error path is locked separately from the successful-query truth table in
+`a_failed_process_token_query_isolates_regardless_of_the_desktop`.
+
 ## Rejected alternatives
 
 - Separate `session.elevated.json` per elevation state: doubles the session
@@ -80,6 +90,9 @@ predicate sits on every persistence path.
   in `platform/elevation/tests.rs`: (elevated, Some(elevated)) → restores,
   (elevated, Some(ordinary)) → isolated, ordinary → never isolated,
   `None` → falls back to the process-only rule.
+- Error-path unit test `a_failed_process_token_query_isolates_regardless_
+  of_the_desktop`: a failed process token query isolates for every desktop
+  observation (elevated / ordinary / absent).
 - Live run on the reporting machine (Administrator desktop, High/High): a
   freshly built instance wrote `session.json` within one autosave tick of
   opening a tab, and its clean teardown wrote `clean_exit: true` — both were
