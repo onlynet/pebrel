@@ -751,6 +751,7 @@ impl NebulaWorkspace {
                 destination,
                 &view,
                 self.remote_git.project(view.pane_id),
+                &self.ssh_group_heads.branches,
             );
         }
         let cwd = view.cwd.as_str();

@@ -137,6 +137,24 @@ pub(super) fn copy_launch(
     (launch, origin.host_cwd)
 }
 
+/// 分屏新 pane 的启动身份：聚焦 SSH 任务继承同主机 + 当前远端任务目录
+/// （[`NebulaWorkspace::focused_ssh_origin`] 的同一口径，用户 10-13
+/// 「新建终端」裁定延伸到 ctrl+shift+d/s）；本地/WSL 交给 [`copy_launch`]。
+/// SSH 身份若落进 `copy_launch` 会被 Split 分支打回本地默认 shell——那条
+/// 分支只认 WSL 启动，而远端 POSIX cwd 在宿主侧 `is_dir` 必假、折不出
+/// `host_cwd`，新 pane 就此落在宿主默认路径（10-31 报障）。
+pub(super) fn split_launch(
+    view: &crate::gpui_shell::terminal::view::TerminalView,
+) -> crate::gpui_shell::terminal::view::TerminalLaunch {
+    use crate::gpui_shell::terminal::view::TerminalLaunch;
+    if let Some(destination) = view.ssh_destination.clone() {
+        return TerminalLaunch::Ssh { destination, cwd: view.remote_cwd(), resume_target: None };
+    }
+    let (launch, cwd) =
+        copy_launch(view.session_launch.clone(), CopyKind::Split, PaneOrigin::of(view));
+    NebulaWorkspace::terminal_launch_from_session(&launch, cwd)
+}
+
 impl NebulaWorkspace {
     /// New-tab identity from the focused pane; see [`PaneOrigin::of`].
     pub(super) fn new_tab_from_focused(&self, cx: &gpui::App) -> (LaunchSession, Option<PathBuf>) {

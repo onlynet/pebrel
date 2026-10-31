@@ -1254,6 +1254,191 @@ mod ssh_sidebar_group_tests {
         });
     }
 
+    /// SSH 聚焦任务的分屏继承（`focused_ssh_origin` 的 10-13 裁定延伸到
+    /// ctrl+shift+d/s）：同主机 + 当前远端任务目录。`copy_launch` 的 Split
+    /// 分支只认 WSL 启动，SSH 身份落进去会被打回本地默认 shell（宿主默认
+    /// 目录）——启动身份决策必须先接住 SSH 再交给 WSL/本地链。只核纯决策
+    /// 函数：真 spawn 会对 example.test 发起必然失败的后台连接。
+    #[gpui::test]
+    fn split_from_an_ssh_task_inherits_host_and_remote_cwd(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::gpui_shell::init(cx, None);
+            windowing::initialize(cx, crate::runtime_api::RuntimeHub::new());
+        });
+        let mut workspace = None;
+        let (_, window) = cx.add_window_view(|window, cx| {
+            let entity = cx.new(|cx| {
+                let mut workspace = NebulaWorkspace::new(
+                    window,
+                    None,
+                    None,
+                    1,
+                    crate::runtime_api::RuntimeHub::new(),
+                    windowing::WorkspaceStartup::Empty,
+                    windowing::WindowRole::Regular,
+                    cx,
+                );
+                let pane = ssh_pane(&mut workspace, None, window, cx);
+                pane.view.update(cx, |view, _| {
+                    view.git_root = "/srv/work/pebrel".into();
+                    view.cwd = "/srv/work/pebrel/src".into();
+                    view.branch = "main".into();
+                });
+                push_terminal_tab(&mut workspace, vec![pane]);
+                workspace
+            });
+            workspace = Some(entity.clone());
+            gpui_component::Root::new(entity, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        window.update(|_, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let launch = match &workspace.tabs[0] {
+                    WorkspaceTab::Terminal { panes, focused, .. } => panes
+                        .iter()
+                        .find(|pane| pane.id == *focused)
+                        .map(|pane| super::super::tab_duplication::split_launch(pane.view.read(cx))),
+                    _ => panic!("expected a terminal tab"),
+                }
+                .expect("the focused pane owns the split identity");
+                // 远端 cwd 已上报：主机与任务目录一起继承。
+                match launch {
+                    TerminalLaunch::Ssh { destination, cwd, resume_target } => {
+                        assert_eq!(destination, "build@example.test");
+                        assert_eq!(cwd.as_deref(), Some("/srv/work/pebrel/src"));
+                        assert!(resume_target.is_none(), "a plain split spawns a fresh shell");
+                    },
+                    other => panic!(
+                        "a split from an SSH pane must stay on the same SSH host, got a different launch variant"
+                    ),
+                }
+                // 远端 cwd 未上报（连接卡片阶段/无集成）：仍继承主机，目录
+                // 回落远端默认（与新建终端同一口径）。
+                match &mut workspace.tabs[0] {
+                    WorkspaceTab::Terminal { panes, .. } => {
+                        panes[0].view.update(cx, |view, _| view.cwd.clear());
+                    },
+                    _ => panic!("expected a terminal tab"),
+                }
+                let launch = match &workspace.tabs[0] {
+                    WorkspaceTab::Terminal { panes, focused, .. } => panes
+                        .iter()
+                        .find(|pane| pane.id == *focused)
+                        .map(|pane| super::super::tab_duplication::split_launch(pane.view.read(cx))),
+                    _ => panic!("expected a terminal tab"),
+                }
+                .expect("the focused pane owns the split identity");
+                assert!(matches!(
+                    launch,
+                    TerminalLaunch::Ssh { ref destination, ref cwd, .. }
+                        if destination == "build@example.test" && cwd.is_none()
+                ));
+            });
+        });
+    }
+
+    /// 组头分支 chip 跟随组内「最近一次上报」的 HEAD，而不是首见 tab 的
+    /// 冻结值：fish/AI agent pane 里 `NEBULA|` 标题静默，`view.branch` 停在
+    /// 进 shell 前的旧支且非空——旧聚合只在组主 branch 为 None 时补位，旧支
+    /// 就此钉死组头。LWW 记录沿 TitleChanged 推进：组主 A 先报 main，B 报
+    /// dev 后组头必须跟随；A 的 OSC 7（只动 cwd）也发 TitleChanged，冻结值
+    /// 不得借此把组头拉回去。
+    #[gpui::test]
+    fn the_group_chip_follows_the_latest_reported_branch_not_the_frozen_first_tab(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::gpui_shell::terminal::view::TerminalViewEvent;
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::gpui_shell::init(cx, None);
+            windowing::initialize(cx, crate::runtime_api::RuntimeHub::new());
+        });
+        let mut workspace = None;
+        let (_, window) = cx.add_window_view(|window, cx| {
+            let entity = cx.new(|cx| {
+                let mut workspace = NebulaWorkspace::new(
+                    window,
+                    None,
+                    None,
+                    1,
+                    crate::runtime_api::RuntimeHub::new(),
+                    windowing::WorkspaceStartup::Empty,
+                    windowing::WindowRole::Regular,
+                    cx,
+                );
+                // 组主 A：曾正常上报 main（进 fish 前的最后一条），此后标题
+                // 静默、OSC 7 照发。
+                let frozen = ssh_pane(&mut workspace, None, window, cx);
+                frozen.view.update(cx, |view, _| {
+                    view.git_root = "/srv/work/pebrel".into();
+                    view.cwd = "/srv/work/pebrel".into();
+                    view.branch = "main".into();
+                });
+                push_terminal_tab(&mut workspace, vec![frozen]);
+                // B：集成在线，切分支后上报 dev。
+                let reporting = ssh_pane(&mut workspace, None, window, cx);
+                reporting.view.update(cx, |view, _| {
+                    view.git_root = "/srv/work/pebrel".into();
+                    view.cwd = "/srv/work/pebrel".into();
+                    view.branch = "dev".into();
+                });
+                push_terminal_tab(&mut workspace, vec![reporting]);
+                workspace
+            });
+            workspace = Some(entity.clone());
+            gpui_component::Root::new(entity, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let group_key = "ssh:build@example.test|/srv/work/pebrel";
+        let chip = |workspace: &NebulaWorkspace, cx: &gpui::App| {
+            workspace.sidebar_list_rows(cx).into_iter().find_map(|row| match row {
+                SidebarRow::GroupHeader { key, branch, .. } if key.as_ref() == group_key => {
+                    branch.as_deref().map(str::to_owned)
+                },
+                _ => None,
+            })
+        };
+        window.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let (frozen, reporting) = match (&workspace.tabs[0], &workspace.tabs[1]) {
+                    (
+                        WorkspaceTab::Terminal { panes: a, .. },
+                        WorkspaceTab::Terminal { panes: b, .. },
+                    ) => (a[0].view.clone(), b[0].view.clone()),
+                    _ => panic!("expected terminal tabs"),
+                };
+                // 构造期 SSH 后台失败沿也会自动进 record（时机不定），清掉
+                // LWW 表与去重表，断言只反映下面显式驱动的 TitleChanged 沿。
+                workspace.ssh_group_heads.branches.clear();
+                workspace.ssh_group_heads.seen.clear();
+                // 基线：A 进 fish 前上报 main，组头 main（走真实事件路由）。
+                workspace.on_terminal_event(&frozen, &TerminalViewEvent::TitleChanged, window, cx);
+                assert_eq!(chip(workspace, cx).as_deref(), Some("main"));
+                // B 切分支上报 dev：组头必须跟着离开冻结值。
+                workspace.on_terminal_event(
+                    &reporting,
+                    &TerminalViewEvent::TitleChanged,
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    chip(workspace, cx).as_deref(),
+                    Some("dev"),
+                    "the group chip follows the latest reported head, not the first tab"
+                );
+                // A 的 OSC 7 沿（cwd 未变，branch 冻结 main）：不得闪回。
+                workspace.on_terminal_event(&frozen, &TerminalViewEvent::TitleChanged, window, cx);
+                assert_eq!(
+                    chip(workspace, cx).as_deref(),
+                    Some("dev"),
+                    "a cwd-only title event must not drag the chip back to the frozen branch"
+                );
+            });
+        });
+    }
+
     /// 「当前任务」总折叠收起本地 + SSH 全部进行中任务（用户 10-19 裁定）：
     /// 折叠后统一列表只剩分区头（最近任务默认收起钉底，不进列表）。
     #[gpui::test]
