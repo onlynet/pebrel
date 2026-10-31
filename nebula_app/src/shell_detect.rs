@@ -406,7 +406,11 @@ fn find_pwsh() -> Option<String> {
         .and_then(|key| key.get_value::<String, _>(""))
         .ok()
         .map(PathBuf::from)
-        .and_then(existing);
+        .and_then(existing)
+        // Store 版把 App Paths 指向 WindowsApps 包安装真身；该目录 ACL 只允许
+        // 包激活，CreateProcessW 直接以它启动会被拒绝（os error 5）。真身
+        // 不能用，交给下面的执行别名候选。
+        .filter(|path| !is_windowsapps_package_install(std::path::Path::new(path)));
     if app_paths.is_some() {
         return app_paths;
     }
@@ -418,6 +422,19 @@ fn find_pwsh() -> Option<String> {
     }
     // Store install exposes an execution alias under WindowsApps.
     env_path("LOCALAPPDATA").and_then(|root| existing(root.join(r"Microsoft\WindowsApps\pwsh.exe")))
+}
+
+/// 路径是否位于 MSIX 包安装真身目录（`%ProgramFiles%\WindowsApps\<包名>`）。
+/// 执行别名（`%LOCALAPPDATA%\Microsoft\WindowsApps`）不受此判定影响。
+#[cfg(windows)]
+pub(crate) fn is_windowsapps_package_install(path: &std::path::Path) -> bool {
+    let Some(program_files) = env_path("ProgramFiles") else {
+        return false;
+    };
+    let normalize =
+        |text: String| text.to_lowercase().replace('/', "\\").trim_end_matches('\\').to_owned();
+    let package_root = format!(r"{}\windowsapps", normalize(program_files.display().to_string()));
+    normalize(path.display().to_string()).starts_with(&format!(r"{package_root}\"))
 }
 
 #[cfg(windows)]
@@ -1042,6 +1059,29 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(windows)]
+    fn windowsapps_package_installs_are_rejected_but_aliases_are_not() {
+        use super::is_windowsapps_package_install;
+        use std::path::Path;
+
+        let program_files =
+            std::env::var("ProgramFiles").expect("ProgramFiles must be set on Windows");
+        let package_install = Path::new(&program_files)
+            .join(r"WindowsApps\Microsoft.PowerShell_7.6.9.0_x64__8wekyb3d8bbwe\pwsh.exe");
+        assert!(is_windowsapps_package_install(&package_install));
+
+        // 执行别名目录同名但位于用户 AppData，必须放行。
+        let local_app_data =
+            std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set on Windows");
+        let alias = Path::new(&local_app_data).join(r"Microsoft\WindowsApps\pwsh.exe");
+        assert!(!is_windowsapps_package_install(&alias));
+
+        // MSI 安装路径不受影响。
+        let msi = Path::new(&program_files).join(r"PowerShell\7\pwsh.exe");
+        assert!(!is_windowsapps_package_install(&msi));
+    }
+
     #[test]
     fn zellij_discovery_requires_an_installed_program_and_preserves_argv() {
         let directory = tempfile::tempdir().unwrap();
