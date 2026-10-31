@@ -56,6 +56,9 @@ impl NebulaWorkspace {
                 // 根失守（fish 等无集成嵌套 shell 里 cwd 移出）才发一次
                 // `rev-parse`，分组/分支 chip/Git 面板根共用其结果。
                 self.refresh_remote_project(view, cx);
+                // SSH 组头分支 chip 的 LWW：新上报的分支顶掉组内冻结的
+                // 旧支（fish/AI agent pane 的标题静默值）。
+                self.record_ssh_group_branch(view, cx);
                 cx.notify();
             },
             TerminalViewEvent::Exited => {

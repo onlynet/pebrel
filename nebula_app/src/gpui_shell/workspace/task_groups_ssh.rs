@@ -85,27 +85,56 @@ fn child_name(destination: &str, key: &str) -> SharedString {
         .into()
 }
 
-/// 组头的分支 chip：集成在线时随 `NEBULA|` 标题走；根陈旧（fish 等无集成
-/// 嵌套 shell，标题静默）时以探测结果为准；空根 + 有分支 = 裸仓库形态
-/// （集成单行输出），保持展示。**分支槽里出现绝对路径形态一律不信**——
-/// 上游（标题协议/远端 git wrapper）把根塞进分支槽时，宁可空着也不错挂。
+/// SSH 组头分支 chip 的「最近上报」状态。
+///
+/// fish/AI agent pane 里 `NEBULA|` 标题静默后 `view.branch` 冻结在旧支且
+/// 非空，首见 tab 的旧聚合（仅 `None` 补位）会把组头钉死在冻结值上——
+/// chip 改随「该组最后说话的人」：TitleChanged 沿把新上报写进
+/// [`Self::branches`]（见 [`NebulaWorkspace::record_ssh_group_branch`]），
+/// render 路径按组键就地读取。pane 全部离开后条目残留：组重建首帧显示
+/// 上次上报值，同仓库大概率仍对，不值得为清理性挂 pane 生命周期。
+#[derive(Default)]
+pub(super) struct SshGroupHeads {
+    /// 组键 → 最近一次上报的分支。
+    pub(super) branches: HashMap<SharedString, SharedString>,
+    /// pane → 上一次被采信的上报值。OSC 7 只报 cwd 也发 TitleChanged，
+    /// 靠它把「冻结 pane 的旧支」挡在 LWW 外，防组头闪回。pane id 单调
+    /// 不复用，条目随 pane 数线性增长且量级无害。
+    pub(super) seen: HashMap<u64, String>,
+}
+
+/// 分支值的可信形态：非空且不是绝对路径（塞错槽的根宁可不信）。
+fn plausible_branch(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty() && !trimmed.starts_with('/')).then_some(trimmed)
+}
+
+/// 组头的分支 chip：集成在线时随「该组最近一次上报」（`latest_reported`，
+/// 见 [`NebulaWorkspace::record_ssh_group_branch`] 的 LWW 表）走，缺席或
+/// 不可信时回落本 pane 的 `NEBULA|` 标题值；根陈旧（fish 等无集成嵌套
+/// shell，标题静默且 cwd 已移出根）时以探测结果为准——latest 不与探测
+/// 竞争，失守组键下的旧上报不得顶掉主动 rev-parse 的新事实；空根 + 有
+/// 分支 = 裸仓库形态（集成单行输出），保持展示。**分支槽里出现绝对路径
+/// 形态一律不信**——上游（标题协议/远端 git wrapper）把根塞进分支槽时，
+/// 宁可空着也不错挂。
 fn group_branch(
     branch: &str,
     git_root: &str,
     cwd: &str,
     project: Option<&super::remote_git::RemoteProject>,
+    latest_reported: Option<&str>,
 ) -> Option<SharedString> {
-    let trimmed = branch.trim();
-    let plausible = !trimmed.is_empty() && !trimmed.starts_with('/');
     if git_root_covers(git_root, cwd) {
-        return plausible.then(|| SharedString::from(trimmed));
+        return latest_reported
+            .and_then(plausible_branch)
+            .or_else(|| plausible_branch(branch))
+            .map(SharedString::from);
     }
     if let Some(project) = project {
-        let probed = project.branch.trim();
-        return (!probed.is_empty() && !probed.starts_with('/'))
-            .then(|| SharedString::from(probed));
+        return plausible_branch(&project.branch).map(SharedString::from);
     }
-    (git_root.trim().is_empty() && plausible).then(|| SharedString::from(trimmed))
+    (git_root.trim().is_empty() && plausible_branch(branch).is_some())
+        .then(|| SharedString::from(branch.trim()))
 }
 
 /// 组键的根来源：集成上报的根（须仍覆盖 cwd）→ 探测根（同 pane、同主机、
@@ -127,11 +156,14 @@ fn group_root<'a>(
 /// 单个 SSH pane 的分组归属（render 纯内存；事件路径打点共用同一函数防漂移）。
 /// `project` 是按 pane 缓存的远端项目身份（`rev-parse` 探测，见
 /// `remote_git` 模块的 `refresh_remote_project`）：集成上报的根陈旧或缺失时
-/// 的补位源，与分支 chip、Git 面板根三处同源。
+/// 的补位源，与分支 chip、Git 面板根三处同源。`group_branches` 是组键 →
+/// 最近上报分支的 LWW 表：组键在本函数内派生，chip 就地按键读取，消费方
+/// 无须重算键。
 pub(super) fn ssh_group_info(
     destination: &str,
     view: &TerminalView,
     project: Option<&super::remote_git::RemoteProject>,
+    group_branches: &HashMap<SharedString, SharedString>,
 ) -> TabGroupInfo {
     let cwd = view.cwd.as_str();
     let reported = view.git_root.as_str();
@@ -143,11 +175,41 @@ pub(super) fn ssh_group_info(
         reported,
         cwd,
         project.filter(|project| project.destination == destination),
+        group_branches.get(&key).map(|branch| branch.as_str()),
     );
     TabGroupInfo { host: Some(destination.into()), key, name, branch }
 }
 
 impl NebulaWorkspace {
+    /// TitleChanged 沿上的 SSH 组分支 LWW 记录：`NEBULA|` 标题带来分支时，
+    /// 把「组键 → 该分支」写进 [`Self::ssh_group_heads`]，组头 chip 由
+    /// render 路径按组键就地读取。只在「上报根仍覆盖 cwd」的组里采信——
+    /// 根失守的组键由 cwd 派生，chip 交给探测补位（[`group_branch`] 的
+    /// 回落序），LWW 不与探测竞争。per-pane 去重防「OSC 7 只报 cwd 也发
+    /// TitleChanged」的回流：冻结 pane 的旧支不得借此把组头拉回去。
+    pub(super) fn record_ssh_group_branch(&mut self, view: &gpui::Entity<TerminalView>, cx: &App) {
+        let view = view.read(cx);
+        let Some(destination) = view.ssh_destination.as_deref() else {
+            return;
+        };
+        let branch = view.branch.trim();
+        if branch.is_empty()
+            || branch.starts_with('/')
+            || !git_root_covers(view.git_root.as_str(), view.cwd.as_str())
+            || self.ssh_group_heads.seen.get(&view.pane_id).is_some_and(|seen| seen == branch)
+        {
+            return;
+        }
+        let info = ssh_group_info(
+            destination,
+            view,
+            self.remote_git.project(view.pane_id),
+            &self.ssh_group_heads.branches,
+        );
+        self.ssh_group_heads.seen.insert(view.pane_id, branch.to_owned());
+        self.ssh_group_heads.branches.insert(info.key, branch.into());
+    }
+
     /// SSH 主机头行：chevron + 服务器图标 + 「SSH {目的地}」名 + 计数。与
     /// 项目组头同一解剖（`render_group_header`），差异只有三处表达层级：服务
     /// 器图标、名字走 `ssh_host` 词典词条（不加 `[ ]` 括号）、无分支 chip。
@@ -341,30 +403,72 @@ mod tests {
     #[test]
     fn branch_chip_follows_the_root_staleness_verdict() {
         assert_eq!(
-            group_branch("main", "/srv/work/pebrel", "/srv/work/pebrel/src", None).as_deref(),
+            group_branch("main", "/srv/work/pebrel", "/srv/work/pebrel/src", None, None).as_deref(),
             Some("main")
         );
         assert_eq!(
-            group_branch("main", "/srv/work/pebrel", "/home/user/other", None),
+            group_branch("main", "/srv/work/pebrel", "/home/user/other", None, None),
             None,
             "旧仓库的分支不上新组"
         );
         assert_eq!(
-            group_branch("main", "", "/srv/bare.git", None).as_deref(),
+            group_branch("main", "", "/srv/bare.git", None, None).as_deref(),
             Some("main"),
             "裸仓库分支保留"
         );
-        assert_eq!(group_branch("", "/srv/work/pebrel", "/srv/work/pebrel", None), None);
+        assert_eq!(group_branch("", "/srv/work/pebrel", "/srv/work/pebrel", None, None), None);
         // 分支槽出现绝对路径形态（上游塞错槽）一律不信。
         assert_eq!(
-            group_branch("/srv/work/pebrel", "/srv/work/pebrel", "/srv/work/pebrel/src", None),
+            group_branch(
+                "/srv/work/pebrel",
+                "/srv/work/pebrel",
+                "/srv/work/pebrel/src",
+                None,
+                None
+            ),
             None
         );
         let confused = project("d", "/srv/work/other", "/srv/work/other", "/srv/work/other");
         assert_eq!(
-            group_branch("main", "/srv/old", "/srv/work/other", Some(&confused)),
+            group_branch("main", "/srv/old", "/srv/work/other", Some(&confused), None),
             None,
             "探测的分支槽同样防御"
+        );
+    }
+
+    /// 组头 chip 随「该组最近一次上报」（LWW）：集成在线（根仍覆盖 cwd）
+    /// 时 latest 顶掉冻结的 `view.branch`——fish/AI agent pane 的标题静默
+    /// 值不再是组头的终点；latest 缺席或不可信（空/路径形态）时回落旧
+    /// 语义；根失守的组键不消费 latest，探测补位继续管。
+    #[test]
+    fn the_latest_reported_branch_wins_while_the_reported_root_still_covers() {
+        assert_eq!(
+            group_branch("main", "/srv/work/pebrel", "/srv/work/pebrel", None, Some("dev"))
+                .as_deref(),
+            Some("dev"),
+            "the latest report outranks the pane's frozen title value"
+        );
+        assert_eq!(
+            group_branch("main", "/srv/work/pebrel", "/srv/work/pebrel", None, Some("/srv"))
+                .as_deref(),
+            Some("main"),
+            "an implausible latest falls back to the pane value"
+        );
+        assert_eq!(
+            group_branch("main", "/srv/work/pebrel", "/srv/work/pebrel", None, Some("")).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            group_branch("main", "/srv/work/pebrel", "/srv/work/pebrel", None, None).as_deref(),
+            Some("main"),
+            "without a latest the pane value keeps the chip"
+        );
+        // 根失守：latest 不与探测竞争，rev-parse 的新事实胜出。
+        let probe = project("d", "/home/user/other", "trunk", "/home/user/other");
+        assert_eq!(
+            group_branch("main", "/srv/work/pebrel", "/home/user/other", Some(&probe), Some("dev"))
+                .as_deref(),
+            Some("trunk")
         );
     }
 
@@ -394,13 +498,17 @@ mod tests {
         );
         // 分支：探测结果顶替静默的标题协议。
         assert_eq!(
-            group_branch("main", "/srv/work/pebrel", "/home/user/other", Some(&probe)).as_deref(),
+            group_branch("main", "/srv/work/pebrel", "/home/user/other", Some(&probe), None)
+                .as_deref(),
             Some("trunk")
         );
         // 探测过但不在仓库：根回落空串（child_key 自行走 cwd），分支为空。
         let bare = project("d", "", "", "/home/user/plain");
         assert_eq!(group_root("d", "/srv/work/pebrel", "/home/user/plain", Some(&bare)), None);
-        assert_eq!(group_branch("main", "/srv/work/pebrel", "/home/user/plain", Some(&bare)), None);
+        assert_eq!(
+            group_branch("main", "/srv/work/pebrel", "/home/user/plain", Some(&bare), None),
+            None
+        );
         // 探测身份属于另一台主机：不得接管。
         let elsewhere = project("other-host", "/srv/work/other", "trunk", "/home/user/other");
         assert_eq!(group_root("d", "/srv/work/pebrel", "/home/user/other", Some(&elsewhere)), None);

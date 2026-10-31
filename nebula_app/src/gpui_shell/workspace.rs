@@ -655,6 +655,8 @@ pub struct NebulaWorkspace {
     /// 根探测只在事件路径（`resolve_project_group`），render 永远只查内存。
     sidebar_group_collapsed: HashMap<SharedString, bool>,
     project_group_cache: HashMap<String, task_groups::LocalProject>,
+    /// SSH 组头分支 chip 的 LWW 状态，见 [`task_groups_ssh::SshGroupHeads`]。
+    ssh_group_heads: task_groups_ssh::SshGroupHeads,
     recent_sessions: recent_sessions::RecentSessionsState,
     /// 顶栏 tab 的水平滚动；ScrollHandle 负责内容边界钳制。
     top_tabs_scroll: gpui::ScrollHandle,
@@ -934,6 +936,7 @@ impl NebulaWorkspace {
             tabs_list_hot: false,
             sidebar_group_collapsed: HashMap::new(),
             project_group_cache: HashMap::new(),
+            ssh_group_heads: Default::default(),
             recent_sessions: Default::default(),
             top_tabs_scroll: gpui::ScrollHandle::new(),
             initial_grid,
@@ -1342,12 +1345,9 @@ impl NebulaWorkspace {
         };
         let (cols, rows, launch) = {
             let view = anchor.view.read(cx);
-            let (launch, cwd) = tab_duplication::copy_launch(
-                view.session_launch.clone(),
-                tab_duplication::CopyKind::Split,
-                tab_duplication::PaneOrigin::of(view),
-            );
-            let launch = Self::terminal_launch_from_session(&launch, cwd);
+            // 分屏继承聚焦 pane 的身份：SSH 任务同主机 + 当前远端任务目录
+            // （`split_launch`），本地/WSL 语义不变。
+            let launch = tab_duplication::split_launch(view);
             (view.grid_cols() as u16, view.grid_rows() as u16, launch)
         };
         let grid = match direction {
