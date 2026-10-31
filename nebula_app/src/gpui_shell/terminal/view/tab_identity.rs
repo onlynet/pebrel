@@ -72,7 +72,15 @@ impl TerminalView {
             .unwrap_or_else(|| ".".to_owned())
     }
 
-    fn reported_ai_task(&self) -> Option<&str> {
+    /// pane 创建时刻的挂钟时间（侧栏任务条目的 HH:MM 展示）。`spawn_at` 是
+    /// 单调时钟，挂钟由 now 反推；只供显示，不参与任何计时判断。
+    pub fn spawned_at(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+            .checked_sub(self.spawn_at.elapsed())
+            .unwrap_or_else(std::time::SystemTime::now)
+    }
+
+    pub(crate) fn reported_ai_task(&self) -> Option<&str> {
         if self.exited.is_some()
             || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
         {

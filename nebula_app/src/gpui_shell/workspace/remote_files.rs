@@ -48,9 +48,11 @@ use crate::ssh_sftp::{
     SftpSnapshot, SftpTransferOptions,
 };
 
+use super::file_tree::DRAWER_TEXT_INSET;
 use super::{NebulaWorkspace, workspace_ui_language};
 
-const TEXT_INSET: f32 = 12.0;
+/// 工具栏与说明文字沿用本地树的抽屉内边距。
+pub(super) const TEXT_INSET: f32 = DRAWER_TEXT_INSET;
 pub(super) const KEY_CONTEXT: &str = "RemoteFiles";
 gpui::actions!(remote_files, [UploadFiles, DownloadSelection]);
 
@@ -275,6 +277,12 @@ impl RemoteBrowser {
 }
 
 impl NebulaWorkspace {
+    /// pane 关闭时清理它名下的远端状态（浏览快照 + Git 只读视图）。
+    /// workspace.rs 的两个关闭路径共用，避免漏一处。
+    pub(super) fn forget_remote_state(&mut self, pane: u64) {
+        self.remote_browser.forget(pane);
+        self.remote_git.forget(pane);
+    }
     /// 聚焦 pane 的远端身份，`None` 表示本地 pane 或 SSH 还没就绪。
     ///
     /// 双条件门控在 [`TerminalView::ready_ssh_destination`] 里：既要是 SSH

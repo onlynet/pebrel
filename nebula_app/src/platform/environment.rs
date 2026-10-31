@@ -23,12 +23,43 @@ pub(crate) fn prepare_local_pty(options: &mut nebula_terminal::tty::Options) {
 #[cfg(windows)]
 fn prepare_windows_local_pty(options: &mut nebula_terminal::tty::Options, refresh: bool) {
     super::shell::prepare_startup_directory(options);
+    redirect_windowsapps_package_shell(options);
     if refresh && let Err(error) = nebula_terminal::tty::refresh_environment(options) {
         log::warn!("Could not refresh the Windows environment for a new pane: {error}");
     }
     let inherited_override =
         !options.env_is_complete && std::env::var_os(GROK_LEGACY_CONSOLE).is_some();
     apply_local_console_defaults(options, inherited_override);
+}
+
+/// Store 包更新会把持久化的会话/历史里的 shell 程序留在 WindowsApps
+/// 包安装真身目录；该目录 ACL 只允许包激活，CreateProcessW 直接启动被拒
+/// （os error 5）。发现层（`shell_detect`）已过滤，这里兜底一切其它来源
+/// （会话恢复、历史记录、用户手填），统一改走执行别名，别名缺席时退回
+/// 裸文件名交给 PATH 搜索。
+#[cfg(windows)]
+fn redirect_windowsapps_package_shell(options: &mut nebula_terminal::tty::Options) {
+    use nebula_terminal::tty::Shell;
+
+    let Some(shell) = options.shell.clone() else { return };
+    let program = std::path::PathBuf::from(shell.program());
+    if !crate::shell_detect::is_windowsapps_package_install(&program) {
+        return;
+    }
+    let file_name =
+        program.file_name().and_then(|name| name.to_str()).unwrap_or("pwsh.exe").to_owned();
+    let alias = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join(r"Microsoft\WindowsApps").join(&file_name))
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .unwrap_or(file_name);
+    log::warn!(
+        "Redirecting WindowsApps package install {} to the execution alias {}",
+        shell.program(),
+        alias
+    );
+    options.shell = Some(Shell::new(alias, shell.args().to_vec()));
 }
 
 #[cfg(windows)]
@@ -48,6 +79,21 @@ fn apply_local_console_defaults(
             let inherited = if options.env_is_complete { None } else { std::env::var(name).ok() };
             options.env.insert(name.to_owned(), inherited.unwrap_or_else(|| value.to_owned()));
         }
+    }
+    // fish 的 OSC 7 目录上报按「已知终端」白名单装钩子
+    // （__fish_config_interactive.fish 按 TERM/TERM_PROGRAM 白名单识别常见
+    // 终端，另有 VTE_VERSION≥3405 的通用通道）。`pebrel` 不在名单里，
+    // 嵌套 Cygwin fish 从此不报 cwd：侧栏分组不跟随、命令完成边缺失、状态
+    // 常驻 Running（用户 10-10）。VTE_VERSION 是该白名单的通用逃生口，且
+    // fish 对它的另外两处消费恰好符合 ConPTY 事实：fish_handle_reflow=0
+    // （ConPTY 自行 reflow，语义为真）与 vi 光标走 DECSCUSR（ConPTY 支持）。
+    // TERM_PROGRAM=pebrel 的身份契约保持不动。取值 6003 = 现代 VTE（≥3405）。
+    if !options.env.keys().any(|key| key.eq_ignore_ascii_case("VTE_VERSION")) {
+        let inherited =
+            if options.env_is_complete { None } else { std::env::var("VTE_VERSION").ok() };
+        options
+            .env
+            .insert("VTE_VERSION".to_owned(), inherited.unwrap_or_else(|| "6003".to_owned()));
     }
     // Grok 1.0.25 treats unknown terminal identities on Windows as legacy consoles and
     // omits its Braille logo. Keep our real identity and use its capability override.
@@ -111,6 +157,51 @@ fn configuration_override(suffix: &str) -> bool {
 mod tests {
     #[cfg(windows)]
     #[test]
+    fn windowsapps_package_shell_programs_are_redirected_to_the_alias() {
+        let program_files =
+            std::env::var("ProgramFiles").expect("ProgramFiles must be set on Windows");
+        let mut options = nebula_terminal::tty::Options {
+            shell: Some(nebula_terminal::tty::Shell::new(
+                format!(
+                    r"{program_files}\WindowsApps\Microsoft.PowerShell_7.6.9.0_x64__8wekyb3d8bbwe\pwsh.exe"
+                ),
+                Vec::new(),
+            )),
+            working_directory: None,
+            drain_on_exit: false,
+            env: Default::default(),
+            env_is_complete: false,
+            escape_args: true,
+        };
+        super::redirect_windowsapps_package_shell(&mut options);
+        let program = options.shell.as_ref().expect("shell preserved").program().to_owned();
+        assert!(
+            !program.contains(r"\WindowsApps\Microsoft.PowerShell_"),
+            "包安装真身必须被改写，got {program}"
+        );
+        let local_app_data =
+            std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set on Windows");
+        let alias = format!(r"{local_app_data}\Microsoft\WindowsApps\pwsh.exe");
+        assert!(
+            program == alias || program == "pwsh.exe",
+            "应改写为执行别名（存在时）或裸文件名，got {program}"
+        );
+
+        // 非包安装路径不受影响。
+        let mut plain = options.clone();
+        plain.shell = Some(nebula_terminal::tty::Shell::new(
+            format!(r"{program_files}\PowerShell\7\pwsh.exe"),
+            Vec::new(),
+        ));
+        super::redirect_windowsapps_package_shell(&mut plain);
+        assert_eq!(
+            plain.shell.expect("shell preserved").program(),
+            format!(r"{program_files}\PowerShell\7\pwsh.exe")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn inherited_environment_reaches_a_real_child_with_pane_overrides() {
         const PROBE: &str = "PEBREL_INHERITED_ENVIRONMENT_PROBE";
         const SENTINEL: &str = "C:\\pebrel-parent-path-only;";
@@ -171,6 +262,7 @@ mod tests {
         assert_eq!(options.env[super::GROK_LEGACY_CONSOLE], "0");
         assert_eq!(options.env["TERM_PROGRAM"], "pebrel");
         assert_eq!(options.env["WSLENV"], "KEEP/p");
+        assert_eq!(options.env["VTE_VERSION"], "6003", "fish OSC 7 allowlist escape hatch");
         assert!(!options.env.contains_key("WT_SESSION"));
         let once = options.clone();
         super::apply_local_console_defaults(&mut options, false);
@@ -187,6 +279,7 @@ mod tests {
                         (name.to_owned(), value.to_owned()),
                         ("TERM".to_owned(), "xterm-256color".to_owned()),
                         ("COLORTERM".to_owned(), "truecolor".to_owned()),
+                        ("VTE_VERSION".to_owned(), "6003".to_owned()),
                     ]
                     .into_iter()
                     .collect(),
@@ -275,6 +368,7 @@ mod tests {
                 ("ColorTerm", "24bit"),
                 ("NO_COLOR", "1"),
                 ("FORCE_COLOR", "0"),
+                ("VTE_VERSION", "4402"),
             ]
             .into_iter()
             .map(|(key, value)| (key.into(), value.into()))
@@ -287,6 +381,7 @@ mod tests {
         assert_eq!(options.env["ColorTerm"], "24bit");
         assert_eq!(options.env["NO_COLOR"], "1");
         assert_eq!(options.env["FORCE_COLOR"], "0");
+        assert_eq!(options.env["VTE_VERSION"], "4402", "an explicit value wins over the default");
         assert!(!options.env.contains_key("TERM") && !options.env.contains_key("COLORTERM"));
     }
 
