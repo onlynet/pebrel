@@ -59,6 +59,9 @@ impl NebulaWorkspace {
                 // SSH 组头分支 chip 的 LWW：新上报的分支顶掉组内冻结的
                 // 旧支（fish/AI agent pane 的标题静默值）。
                 self.record_ssh_group_branch(view, cx);
+                // 无集成 shell（fish 等）里切分支没有上报信号：组级探测
+                // 按节流窗兜底，chip 在窗口 + 网络往返内跟上真实 HEAD。
+                self.probe_ssh_group_head(view, cx);
                 cx.notify();
             },
             TerminalViewEvent::Exited => {
