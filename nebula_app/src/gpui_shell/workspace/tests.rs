@@ -1439,6 +1439,89 @@ mod ssh_sidebar_group_tests {
         });
     }
 
+    /// 无集成 shell（fish）里切分支对上报协议完全不可见——`NEBULA|` 静默、
+    /// `view.branch` 冻结、seen 去重挡掉一切回流：组级探测的落地
+    /// （`apply_probe_head`，真实链路里由 TitleChanged 节流发起的
+    /// rev-parse 回调写入）是 chip 唯一的新鲜来源，必须穿透冻结值；迟到
+    /// 的旧探测（发出时刻早于现存记录）不得回退它。
+    #[gpui::test]
+    fn the_group_chip_follows_a_probe_head_when_the_pane_shell_is_silent(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::gpui_shell::init(cx, None);
+            windowing::initialize(cx, crate::runtime_api::RuntimeHub::new());
+        });
+        let mut workspace = None;
+        let (_, window) = cx.add_window_view(|window, cx| {
+            let entity = cx.new(|cx| {
+                let mut workspace = NebulaWorkspace::new(
+                    window,
+                    None,
+                    None,
+                    1,
+                    crate::runtime_api::RuntimeHub::new(),
+                    windowing::WorkspaceStartup::Empty,
+                    windowing::WindowRole::Regular,
+                    cx,
+                );
+                // fish pane：进 fish 前上报过 main，此后标题静默、OSC 7 照发。
+                let silent = ssh_pane(&mut workspace, None, window, cx);
+                silent.view.update(cx, |view, _| {
+                    view.git_root = "/srv/work/pebrel".into();
+                    view.cwd = "/srv/work/pebrel".into();
+                    view.branch = "main".into();
+                });
+                push_terminal_tab(&mut workspace, vec![silent]);
+                workspace
+            });
+            workspace = Some(entity.clone());
+            gpui_component::Root::new(entity, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let group_key: gpui::SharedString = "ssh:build@example.test|/srv/work/pebrel".into();
+        let chip = |workspace: &NebulaWorkspace, cx: &gpui::App| {
+            workspace.sidebar_list_rows(cx).into_iter().find_map(|row| match row {
+                SidebarRow::GroupHeader { key, branch, .. } if key == group_key => {
+                    branch.as_deref().map(str::to_owned)
+                },
+                _ => None,
+            })
+        };
+        window.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let silent = match &workspace.tabs[0] {
+                    WorkspaceTab::Terminal { panes, .. } => panes[0].view.clone(),
+                    _ => panic!("expected a terminal tab"),
+                };
+                // 构造期后台沿的竞态隔离（同上一测试）。
+                workspace.ssh_group_heads = Default::default();
+                // 基线：进 fish 前上报 main；此后 TitleChanged（fish 提示符的
+                // OSC 7）只有 seen 去重，上报通道无新鲜值。
+                workspace.on_terminal_event(&silent, &TerminalViewEvent::TitleChanged, window, cx);
+                assert_eq!(chip(workspace, cx).as_deref(), Some("main"));
+                // fish 里 checkout dev：探测落地（发出时刻 = 现在）穿透冻结值。
+                workspace.ssh_group_heads.apply_probe_head(
+                    &group_key,
+                    "dev",
+                    std::time::Instant::now(),
+                );
+                assert_eq!(
+                    chip(workspace, cx).as_deref(),
+                    Some("dev"),
+                    "a probe head is the only fresh source while the shell is silent"
+                );
+                // 迟到的旧探测（发出时刻早于刚才的落地）不得回退。
+                let stale = std::time::Instant::now() - std::time::Duration::from_secs(10);
+                workspace.ssh_group_heads.apply_probe_head(&group_key, "main", stale);
+                assert_eq!(
+                    chip(workspace, cx).as_deref(),
+                    Some("dev"),
+                    "a late probe issued before the accepted record must not regress the chip"
+                );
+            });
+        });
+    }
+
     /// 「当前任务」总折叠收起本地 + SSH 全部进行中任务（用户 10-19 裁定）：
     /// 折叠后统一列表只剩分区头（最近任务默认收起钉底，不进列表）。
     #[gpui::test]

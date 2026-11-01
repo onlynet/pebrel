@@ -17,6 +17,7 @@
 
 use super::task_groups::TabGroupInfo;
 use super::*;
+use std::time::Instant;
 
 /// 主机键前缀，与 `recent:` 前缀同一约定：与侧栏折叠表
 /// （`sidebar_group_collapsed`）共用键空间，前缀隔离后互不干扰。
@@ -95,12 +96,39 @@ fn child_name(destination: &str, key: &str) -> SharedString {
 /// 上次上报值，同仓库大概率仍对，不值得为清理性挂 pane 生命周期。
 #[derive(Default)]
 pub(super) struct SshGroupHeads {
-    /// 组键 → 最近一次上报的分支。
-    pub(super) branches: HashMap<SharedString, SharedString>,
+    /// 组键 →（最近采信的分支，采信时刻）。两条写入源——`NEBULA|` 上报
+    /// 沿（[`NebulaWorkspace::record_ssh_group_branch`]）与组级探测落地
+    /// （[`Self::apply_probe_head`]，见 `probe_ssh_group_head`）——按时刻
+    /// 仲裁：迟到的旧探测不得覆盖更晚的上报。
+    pub(super) branches: HashMap<SharedString, (SharedString, Instant)>,
+    /// 组键 → 上次探测的发出时刻（`probe_ssh_group_head` 的节流窗判据）。
+    pub(super) probed_at: HashMap<SharedString, Instant>,
+    /// 探测在途的组键（慢网络下防同组重入；完成回调移除）。
+    pub(super) probing: std::collections::HashSet<SharedString>,
     /// pane → 上一次被采信的上报值。OSC 7 只报 cwd 也发 TitleChanged，
     /// 靠它把「冻结 pane 的旧支」挡在 LWW 外，防组头闪回。pane id 单调
     /// 不复用，条目随 pane 数线性增长且量级无害。
     pub(super) seen: HashMap<u64, String>,
+}
+
+impl SshGroupHeads {
+    /// 组级探测的落地（带仲裁）：`issued_at` 是探测**发出**时刻，晚于现存
+    /// 记录才可覆盖——并发场景里刚到的上报更新鲜，迟到的探测不得回退它；
+    /// 不可信值（空/路径形态，同 [`plausible_branch`]）一律不落地。
+    pub(super) fn apply_probe_head(
+        &mut self,
+        key: &SharedString,
+        branch: &str,
+        issued_at: Instant,
+    ) {
+        let Some(branch) = plausible_branch(branch) else {
+            return;
+        };
+        if self.branches.get(key).is_some_and(|(_, at)| *at >= issued_at) {
+            return;
+        }
+        self.branches.insert(key.clone(), (branch.to_owned().into(), issued_at));
+    }
 }
 
 /// 分支值的可信形态：非空且不是绝对路径（塞错槽的根宁可不信）。
@@ -163,7 +191,7 @@ pub(super) fn ssh_group_info(
     destination: &str,
     view: &TerminalView,
     project: Option<&super::remote_git::RemoteProject>,
-    group_branches: &HashMap<SharedString, SharedString>,
+    group_branches: &HashMap<SharedString, (SharedString, Instant)>,
 ) -> TabGroupInfo {
     let cwd = view.cwd.as_str();
     let reported = view.git_root.as_str();
@@ -175,7 +203,7 @@ pub(super) fn ssh_group_info(
         reported,
         cwd,
         project.filter(|project| project.destination == destination),
-        group_branches.get(&key).map(|branch| branch.as_str()),
+        group_branches.get(&key).map(|(branch, _)| branch.as_str()),
     );
     TabGroupInfo { host: Some(destination.into()), key, name, branch }
 }
@@ -207,7 +235,7 @@ impl NebulaWorkspace {
             &self.ssh_group_heads.branches,
         );
         self.ssh_group_heads.seen.insert(view.pane_id, branch.to_owned());
-        self.ssh_group_heads.branches.insert(info.key, branch.into());
+        self.ssh_group_heads.branches.insert(info.key, (branch.into(), Instant::now()));
     }
 
     /// SSH 主机头行：chevron + 服务器图标 + 「SSH {目的地}」名 + 计数。与
@@ -434,6 +462,29 @@ mod tests {
             None,
             "探测的分支槽同样防御"
         );
+    }
+
+    /// 探测落地的时刻仲裁：晚于现存记录的探测才可覆盖；发出更早的迟到
+    /// 探测不得回退；不可信值（空/路径形态）一律不落地。
+    #[test]
+    fn probe_heads_arbitrate_by_issue_time() {
+        use std::time::Duration;
+        let mut heads = SshGroupHeads::default();
+        let key: SharedString = "ssh:d|/srv/work".into();
+        let t0 = std::time::Instant::now();
+        heads.apply_probe_head(&key, "main", t0);
+        assert_eq!(heads.branches.get(&key).unwrap().0.as_ref(), "main");
+        // 更晚发出的探测覆盖。
+        heads.apply_probe_head(&key, "dev", t0 + Duration::from_millis(10));
+        assert_eq!(heads.branches.get(&key).unwrap().0.as_ref(), "dev");
+        // 迟到的旧探测（发出更早）不回退刚采信的值。
+        heads.apply_probe_head(&key, "main", t0 + Duration::from_millis(5));
+        assert_eq!(heads.branches.get(&key).unwrap().0.as_ref(), "dev");
+        // 不可信值不落地（chip 保持最后已知值）。
+        heads.apply_probe_head(&key, "/srv/work", t0 + Duration::from_secs(1));
+        assert_eq!(heads.branches.get(&key).unwrap().0.as_ref(), "dev");
+        heads.apply_probe_head(&key, "", t0 + Duration::from_secs(2));
+        assert_eq!(heads.branches.get(&key).unwrap().0.as_ref(), "dev");
     }
 
     /// 组头 chip 随「该组最近一次上报」（LWW）：集成在线（根仍覆盖 cwd）

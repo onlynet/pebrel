@@ -55,6 +55,10 @@ const OP_BUDGET: Duration = Duration::from_secs(30);
 
 /// 项目身份探测（`git rev-parse`，单叉读操作）的时间预算。
 const PROBE_BUDGET: Duration = Duration::from_secs(3);
+/// 组头分支 chip 探测的节流窗：fish 等无集成 shell 里 checkout 对上报
+/// 协议天生不可见，探测沿 TitleChanged（fish 的 OSC 7 照发）兜底；窗口取
+/// 「跟手」与「每提示符一条 exec」的折中。
+const HEAD_PROBE_THROTTLE: Duration = Duration::from_secs(2);
 
 /// 单个 SSH pane 的远端项目身份：`git rev-parse --abbrev-ref HEAD
 /// --show-toplevel` 一次探测的结果（与远端集成同一条命令、同一输出契约）。
@@ -399,6 +403,100 @@ impl NebulaWorkspace {
             });
         })
         .detach();
+    }
+
+    /// 组头分支 chip 的组级探测（fish/AI agent pane 在无集成 shell 里切
+    /// 分支的兜底，2026-11-01 报障）：`NEBULA|` 上报只覆盖集成 shell，
+    /// 嵌套 fish 里的 checkout 没有任何上报信号——LWW 无输入，chip 停在
+    /// 冻结值。探测沿 TitleChanged（fish 的 OSC 7 照发，事件沿不缺）节流
+    /// 发起：每 [`HEAD_PROBE_THROTTLE`] 窗口至多一条
+    /// `rev-parse --abbrev-ref HEAD`（与 [`Self::refresh_remote_project`]
+    /// 同命令构造、同预算、同解析），结果经
+    /// [`task_groups_ssh::SshGroupHeads::apply_probe_head`] 按发出时刻
+    /// 仲裁进 LWW——迟到的旧探测不覆盖更晚的上报；失败静默（chip 保持
+    /// 最后已知值）。只在仓库组（root 覆盖 cwd，判据同 `ssh_group_info`
+    /// 的 `group_root`）发起：cwd 组/兜底组没有 chip。
+    pub(super) fn probe_ssh_group_head(
+        &mut self,
+        view: &gpui::Entity<crate::gpui_shell::terminal::view::TerminalView>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let (destination, cwd, git_root, project_root) = {
+            let view = view.read(cx);
+            let Some(destination) = view.ready_ssh_destination() else {
+                return;
+            };
+            let project_root = self
+                .remote_git
+                .project(view.pane_id)
+                .filter(|project| project.destination == destination)
+                .map(|project| project.root.trim().to_owned());
+            (
+                destination.to_owned(),
+                view.cwd.trim().to_owned(),
+                view.git_root.trim().to_owned(),
+                project_root,
+            )
+        };
+        let root_covers = |root: &str| super::task_groups_ssh::git_root_covers(root, &cwd);
+        let root = if root_covers(&git_root) {
+            git_root
+        } else {
+            match project_root.filter(|root| root_covers(root)) {
+                Some(root) => root,
+                // 非仓库组（root 不覆盖 cwd）：没有分支 chip 可探。
+                None => return,
+            }
+        };
+        if cwd.is_empty() {
+            return;
+        }
+        let key = super::task_groups_ssh::child_key(&destination, &root, &cwd);
+        let now = std::time::Instant::now();
+        let heads = &mut self.ssh_group_heads;
+        if heads.probing.contains(&key)
+            || heads
+                .probed_at
+                .get(&key)
+                .is_some_and(|at| now.duration_since(*at) < HEAD_PROBE_THROTTLE)
+        {
+            return;
+        }
+        heads.probing.insert(key.clone());
+        heads.probed_at.insert(key.clone(), now);
+        #[cfg(not(test))]
+        {
+            let command = remote_git_command(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"]);
+            let probe_destination = destination;
+            cx.spawn(async move |this, cx| {
+                let branch = remote_call(|| async move {
+                    crate::ssh_session::exec_capture(
+                        &probe_destination,
+                        &command,
+                        b"",
+                        PROBE_BUDGET,
+                    )
+                    .await
+                })
+                .await
+                .and_then(|result| result.ok())
+                .and_then(|stdout| probe_branch(&stdout));
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.ssh_group_heads.probing.remove(&key);
+                    if let Some(branch) = branch {
+                        workspace.ssh_group_heads.apply_probe_head(&key, &branch, now);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        #[cfg(test)]
+        {
+            // 测试环境不发起远端 exec（gpui 调度器要求确定性）；节流/在途
+            // 置位仍生效，落地链路由 apply_probe_head 的单测与集成测试覆盖。
+            let _ = destination;
+        }
     }
 
     /// 在远端跑一次 `git status` 并落快照。
