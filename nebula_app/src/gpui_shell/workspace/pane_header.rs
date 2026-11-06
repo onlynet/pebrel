@@ -817,7 +817,7 @@ impl NebulaWorkspace {
         self.active = at;
         self.focus_active(window, cx);
         self.sync_side_panel_to_active(true, cx);
-        self.reveal_active_tab();
+        self.reveal_active_tab(cx);
         cx.notify();
     }
 

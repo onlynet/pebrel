@@ -199,12 +199,12 @@ impl NebulaWorkspace {
     }
 
     /// 所有新建标签共用同一个插入口，避免本地/SSH/设置各自解释配置。
-    pub(super) fn insert_new_tab(&mut self, tab: WorkspaceTab) {
+    pub(super) fn insert_new_tab(&mut self, tab: WorkspaceTab, cx: &gpui::App) {
         let position = nebula_settings::RuntimeSettings::load().new_tab_position;
         let at = new_tab_insert_index(position, self.active, self.tabs.len());
         self.insert_tab_at(at, tab, TabMeta::default());
         self.active = at;
-        self.reveal_active_tab();
+        self.reveal_active_tab(cx);
     }
 }
 

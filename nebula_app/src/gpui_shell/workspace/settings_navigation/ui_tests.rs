@@ -1,6 +1,18 @@
 use super::super::*;
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
+/// 测试基准设置：钉死出厂默认（界面字号 15px、经典侧栏），隔离本机持久
+/// 化设置——`Settings::load` 读真实 RuntimeSettings，本机 `ui_font_size=13`
+/// 或 `ai_agent_sidebar=1` 会改变行高与渲染路径，而本文件的布局断言全部
+/// 按出厂基准设计（2026-11-06 修复 4 个环境敏感失败）。
+fn baseline_settings() -> crate::gpui_shell::config::Settings {
+    let mut settings = crate::gpui_shell::config::Settings::load(nebula_settings::ThemeName::Nord);
+    settings.ui_font_size_px = 15.0;
+    settings.ui_font_size_override = None;
+    settings.ai_agent_sidebar = false;
+    settings
+}
+
 fn open_workspace(
     count: usize,
     cx: &mut TestAppContext,
@@ -9,10 +21,12 @@ fn open_workspace(
     let hub = crate::runtime_api::RuntimeHub::new();
     cx.update(|cx| {
         gpui_component::init(cx);
-        cx.set_global(crate::gpui_shell::config::Settings::load(nebula_settings::ThemeName::Nord));
+        // init 内部会从真实 RuntimeSettings 重新 set_global，测试基准必须
+        // 装在它之后才能生效（否则被本机持久化设置覆盖）。
         crate::gpui_shell::math_view::register(cx);
         crate::gpui_shell::file_editor::init(cx);
         init(cx);
+        cx.set_global(baseline_settings());
         windowing::initialize(cx, hub.clone());
     });
     let mut workspace_out = None;
@@ -63,6 +77,10 @@ fn open_workspace(
         cx.notify();
     });
     window.run_until_parked();
+    // 窗口首帧的外观回调（observe_window_appearance → apply_runtime_
+    // settings）会从真实持久化重装 `Settings` global，把此前装的测试基准
+    // 覆盖掉；窗口就绪后在最终帧前重装一次基准。
+    window.update(|_, cx| cx.set_global(baseline_settings()));
     (directory, workspace_out.unwrap(), window.clone())
 }
 
@@ -88,8 +106,7 @@ fn redraw(cx: &mut VisualTestContext) {
 /// 并重画。全局 `Settings` 重建即热切换，无需重开窗口。
 fn enable_agent_sidebar(cx: &mut VisualTestContext) {
     cx.update(|_, cx| {
-        let mut settings =
-            crate::gpui_shell::config::Settings::load(nebula_settings::ThemeName::Nord);
+        let mut settings = baseline_settings();
         settings.ai_agent_sidebar = true;
         cx.set_global(settings);
     });
@@ -256,7 +273,7 @@ fn density_changes_real_tab_bounds_and_sidebar_drag_pitch(cx: &mut TestAppContex
                 workspace.tabs_position = position;
                 workspace.density = density;
                 workspace.sync_settings_layout(tab_reveal_instant(cx));
-                workspace.reveal_active_tab();
+                workspace.reveal_active_tab(cx);
                 cx.notify();
             });
             cx.run_until_parked();
@@ -896,4 +913,48 @@ fn ai_agent_sidebar_toggle_switches_renderers(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("sidebar-group-name-workspace").is_some(), "group header renders");
     assert!(cx.debug_bounds("sidebar-tabs-hairline").is_some(), "section hairline renders");
     assert!(cx.debug_bounds("sidebar-tab-0").is_some(), "grouped rows render");
+}
+
+/// 分组侧栏的 reveal 不写回经典口径（2026-11-06 修复）：`tabs_scroll` 在
+/// 分组模式是行索引（含分区头/组头），旧实现按经典均匀窗口（任务索引）
+/// 钳制写回，会把用户滚到的位置拉回任务口径上限——点击可见任务滚动条也
+/// 向上跳。修复后分组模式只置 pending：滚动位置纹丝不动，render 侧
+/// `rows_window` 换算；滚出窗口的任务仍按行口径滚入。
+#[gpui::test]
+fn agent_sidebar_reveal_keeps_user_scroll_and_reveals_out_of_window(cx: &mut TestAppContext) {
+    let (_directory, workspace, mut cx) = open_workspace(6, cx);
+    enable_agent_sidebar(&mut cx);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.tabs_position = nebula_settings::TabsPositionName::Sidebar;
+        workspace.sync_settings_layout(false);
+        // 模拟 render 探针量得的小视口（约 2 行）与用户滚到列表深处的
+        // 行口径位置。行模型：分区头 26 + 组头 26 + 6×条目；经典口径的
+        // max（6 任务 − 3 可见 = 3）与本侧行口径 3 巧合同值时旧 bug 不显，
+        // 故取 show=2 的视口让两口径上限分开（行 max 6 > 任务 max 3）。
+        workspace.tabs_viewport_h = 120.0;
+        workspace.tabs_scroll = 3;
+        // 点击可见任务（Tab1 在窗口行 [3,5) 内）：滚动位置必须保持。
+        workspace.active = 1;
+        workspace.reveal_active_tab(cx);
+        assert_eq!(workspace.tabs_scroll, 3, "no legacy write-back in grouped mode");
+        assert!(workspace.tabs_scroll_pending_reveal, "reveal deferred to render");
+        let rows = workspace.sidebar_list_rows(cx);
+        let (heights, _) = workspace.rows_geometry(&rows, cx);
+        assert_eq!(
+            workspace.rows_window(&rows, &heights).scroll,
+            3,
+            "visible click keeps the window"
+        );
+        // 激活滚出窗口上方的任务：pending 在 render 侧按行口径对齐该行。
+        workspace.active = 0;
+        workspace.reveal_active_tab(cx);
+        assert_eq!(workspace.tabs_scroll, 3, "still no legacy write-back");
+        let rows = workspace.sidebar_list_rows(cx);
+        let (heights, _) = workspace.rows_geometry(&rows, cx);
+        assert_eq!(
+            workspace.rows_window(&rows, &heights).scroll,
+            2,
+            "out-of-window active reveals"
+        );
+    });
 }

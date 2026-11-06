@@ -1144,7 +1144,7 @@ impl NebulaWorkspace {
         self.sidebar_width = runtime.sidebar_width;
         self.tabs_position = runtime.tabs_position;
         self.density = runtime.density;
-        self.reveal_active_tab();
+        self.reveal_active_tab(cx);
         self.sync_settings_layout(tab_reveal_instant(cx));
         self.sidebar_resizing = None;
         self.reveal_if_tray_disabled(cx);
@@ -1262,7 +1262,7 @@ impl NebulaWorkspace {
             TabMeta { shell_tag, launch: Some(launch_session), ..TabMeta::default() },
         );
         self.active = at;
-        self.reveal_active_tab();
+        self.reveal_active_tab(cx);
         self.focus_active(window, cx);
         self.sync_side_panel_to_active(true, cx);
         cx.notify();
@@ -1608,7 +1608,7 @@ impl NebulaWorkspace {
         ) {
             log::warn!("Could not save closed tabs: {error}");
         }
-        self.reveal_active_tab();
+        self.reveal_active_tab(cx);
         self.focus_active(window, cx);
         self.sync_side_panel_to_active(true, cx);
         cx.notify();

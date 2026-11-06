@@ -235,13 +235,19 @@ impl NebulaWorkspace {
 
     /// 激活/新建 tab 的揭示。两条侧栏路径各取所需，互不干扰：
     /// 经典均匀窗口在这里即时换算写回（main 行为，无行模型可等）；分组
-    /// 行模型只在 render 侧完整，交给 pending 标志换算——legacy 写入的
-    /// 口径差异由 `rows_window` 的虚拟钳制兜底。顶栏（ScrollHandle）立即滚。
-    pub(super) fn reveal_active_tab(&mut self) {
-        let window = self.tabs_window();
-        self.tabs_scroll =
-            clamp_scroll(reveal_index(self.active, window.scroll, window.show), window.max);
-        self.tabs_scroll_pending_reveal = true;
+    /// 行模型只在 render 侧完整，交给 pending 标志换算，且**不写回**
+    /// `tabs_scroll`——分组口径的 scroll 是行索引，经典口径的钳制会把
+    /// 用户滚到的位置拉回任务口径上限，点击可见任务滚动条也向上跳
+    /// （2026-11-06 裁定与经典侧栏行为对齐）。顶栏（ScrollHandle）立即滚。
+    pub(super) fn reveal_active_tab(&mut self, cx: &gpui::App) {
+        if crate::gpui_shell::config::ai_agent_sidebar(cx) {
+            self.tabs_scroll_pending_reveal = true;
+        } else {
+            let window = self.tabs_window();
+            self.tabs_scroll =
+                clamp_scroll(reveal_index(self.active, window.scroll, window.show), window.max);
+            self.tabs_scroll_pending_reveal = true;
+        }
         self.top_tabs_scroll.scroll_to_item(if self.settings_open {
             self.tabs.len()
         } else {
