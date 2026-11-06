@@ -1105,7 +1105,6 @@ mod ssh_sidebar_group_tests {
                         SidebarRow::SshSectionHeader { count, .. } => {
                             format!("ssh-section {count}")
                         },
-                        SidebarRow::SectionDivider => "divider".to_owned(),
                         SidebarRow::HostHeader { key, tabs, .. } => format!("host {key} {tabs}"),
                         SidebarRow::GroupHeader { key, tabs, .. } => {
                             format!("group {key} {tabs}")
@@ -1575,13 +1574,12 @@ mod ssh_sidebar_group_tests {
         let workspace = workspace.unwrap();
         window.update(|_, cx| {
             workspace.update(cx, |workspace, cx| {
-                // 展开态：本地组在上、分隔行 + SSH 子分区头、主机块在下。
+                // 展开态：本地组在上、SSH 子分区头、主机块在下。
                 let rows = workspace.sidebar_list_rows(cx);
                 let kinds: Vec<&str> = rows
                     .iter()
                     .map(|row| match row {
                         SidebarRow::TabsSectionHeader { .. } => "current",
-                        SidebarRow::SectionDivider => "divider",
                         SidebarRow::SshSectionHeader { .. } => "ssh-section",
                         SidebarRow::GroupHeader { .. } => "group",
                         SidebarRow::HostHeader { .. } => "host",
@@ -1591,16 +1589,7 @@ mod ssh_sidebar_group_tests {
                     .collect();
                 assert_eq!(
                     kinds,
-                    vec![
-                        "current",
-                        "group",
-                        "tab",
-                        "divider",
-                        "ssh-section",
-                        "host",
-                        "group",
-                        "tab"
-                    ]
+                    vec!["current", "group", "tab", "ssh-section", "host", "group", "tab"]
                 );
                 // 总折叠：本地 + SSH 全收起，只剩分区头。
                 workspace.tabs_section_collapsed = true;
@@ -1615,7 +1604,6 @@ mod ssh_sidebar_group_tests {
                     .iter()
                     .map(|row| match row {
                         SidebarRow::TabsSectionHeader { .. } => "current",
-                        SidebarRow::SectionDivider => "divider",
                         SidebarRow::SshSectionHeader { .. } => "ssh-section",
                         SidebarRow::GroupHeader { .. } => "group",
                         SidebarRow::HostHeader { .. } => "host",
@@ -1623,7 +1611,7 @@ mod ssh_sidebar_group_tests {
                         _ => "other",
                     })
                     .collect();
-                assert_eq!(kinds, vec!["current", "group", "tab", "divider", "ssh-section"]);
+                assert_eq!(kinds, vec!["current", "group", "tab", "ssh-section"]);
             });
         });
     }

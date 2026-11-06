@@ -4,8 +4,9 @@
 //!
 //! TABS 分组由 pane 的 cwd 派生：同一 git 仓库（或同一 cwd）的 tab 归一组，
 //! 组头带项目名、分支 chip 与折叠箭头。组不是用户数据，**不参与 tab 顺序**；
-//! 「当前任务」内部分两段：本地组在上、SSH 主机在下（用户 10-19 裁定，段间
-//! 分隔行 + 「SSH 主机」子分区头），段内按**首见序**（组首次出现 ≈ 每个项目
+//! 「当前任务」内部分两段：本地组在上、SSH 主机在下（用户 10-19 裁定；段间
+//! 独立分隔行已按 2026-11-06 裁定撤掉，分隔交给「SSH 主机」子分区头自带的
+//! hairline），段内按**首见序**（组首次出现 ≈ 每个项目
 //! 第一个 tab 的创建顺序）排列，点击切换任务不改任何排序输入。git 仓库根的
 //! 探测只发生在事件路径（见
 //! [`NebulaWorkspace::resolve_project_group`]），render 路径永远只查内存，
@@ -34,9 +35,10 @@ pub(super) const WORKSPACE_GROUP_KEY: &str = "workspace";
 /// 最高的条目，但 26px 仍高于 20px 的最小命中区起点。
 pub(super) const GROUP_HEADER_H: f32 = 26.0;
 
-/// 本地段与 SSH 段之间分隔行的行高（逻辑 px）：一条 hairline 的呼吸带，
-/// 非交互、非命中目标。
-pub(super) const SECTION_DIVIDER_H: f32 = 14.0;
+/// 分组侧栏分区头（当前任务/SSH 主机/最近任务）行高（逻辑 px）：与组头
+/// 同高的紧凑档（2026-11-06 裁定），层级靠字号与 hairline 区分。经典侧栏
+/// 的分区行高仍是 `tab_scroll::tab_row_height`（main 原样，勿改）。
+pub(super) const SECTION_HEADER_H: f32 = 26.0;
 
 /// 组头折叠箭头槽宽（最左列）与分支图标边长（与 tag 字号同档）。
 pub(super) const GROUP_CHEVRON_SLOT_W: f32 = 16.0;
@@ -344,8 +346,6 @@ pub(super) enum SidebarRow {
         count: usize,
         collapsed: bool,
     },
-    /// 本地段与 SSH 段之间的非交互分隔行；仅在两段都有内容时出现。
-    SectionDivider,
     /// 「SSH 主机」子分区头（本地段之后）：折叠时收起所有主机块，只留本行。
     SshSectionHeader {
         /// SSH 段 tab 总数（所有主机之和）。
@@ -528,14 +528,12 @@ pub(super) fn grouped_rows(
         return rows;
     }
     // SSH 子分区头只要有 SSH 内容就出现（纯 SSH 场景它是唯一的段折叠开关，
-    // 不能随段折叠一起消失）；分隔行只在两段都有内容时才需要。
+    // 不能随段折叠一起消失）；段间不插独立分隔行（2026-11-06 裁定），
+    // 分隔由子分区头自带的 hairline 承担。
     let ssh_tabs: usize = hosts
         .iter()
         .map(|(_, _, groups, _)| groups.iter().map(|group| group.tabs.len()).sum::<usize>())
         .sum();
-    if !locals.is_empty() {
-        rows.push(SidebarRow::SectionDivider);
-    }
     rows.push(SidebarRow::SshSectionHeader { count: ssh_tabs, collapsed: ssh_section_collapsed });
     if ssh_section_collapsed {
         return rows;
@@ -572,13 +570,12 @@ pub(super) fn row_height(row: &SidebarRow, metrics: &RowMetrics) -> f32 {
     match row {
         SidebarRow::TabsSectionHeader { .. }
         | SidebarRow::RecentSectionHeader { .. }
-        | SidebarRow::SshSectionHeader { .. } => super::tab_scroll::tab_row_height(metrics.density),
+        | SidebarRow::SshSectionHeader { .. } => SECTION_HEADER_H,
         SidebarRow::GroupHeader { .. }
         | SidebarRow::RecentGroupHeader { .. }
         | SidebarRow::HostHeader { .. } => GROUP_HEADER_H,
         SidebarRow::Tab { .. } | SidebarRow::RecentSession(_) => sidebar_entry_height(metrics),
         SidebarRow::RecentStatus { .. } => GROUP_HEADER_H,
-        SidebarRow::SectionDivider => SECTION_DIVIDER_H,
     }
 }
 
@@ -1097,7 +1094,6 @@ mod tests {
                     collapsed: false
                 },
                 SidebarRow::Tab { ix: 3 },
-                SidebarRow::SectionDivider,
                 SidebarRow::SshSectionHeader { count: 3, collapsed: false },
                 SidebarRow::HostHeader {
                     key: "ssh:build@10.0.0.7".into(),
@@ -1180,11 +1176,12 @@ mod tests {
         );
     }
 
-    /// 分区语义（用户 10-19 裁定）：本地组在上、SSH 主机在下，段间分隔行
-    /// + 子分区头；本地兜底组垫**本地段**底（不再与 SSH 主机同场混排）；
-    /// 主机内的兜底子组（cwd 未知）垫在主机内底部。
+    /// 分区语义（用户 10-19 裁定）：本地组在上、SSH 主机在下，段间只有
+    /// 子分区头（独立分隔行已撤，2026-11-06）；本地兜底组垫**本地段**底
+    /// （不再与 SSH 主机同场混排）；主机内的兜底子组（cwd 未知）垫在主机
+    /// 内底部。
     #[test]
-    fn locals_precede_ssh_hosts_with_a_divider_and_fallbacks_sink() {
+    fn locals_precede_ssh_hosts_and_fallbacks_sink() {
         let infos = [
             info(WORKSPACE_GROUP_KEY),
             info("D:/local"),
@@ -1198,7 +1195,6 @@ mod tests {
                 SidebarRow::HostHeader { key, .. } => format!("host:{key}"),
                 SidebarRow::GroupHeader { key, .. } => format!("group:{key}"),
                 SidebarRow::Tab { ix } => format!("tab{ix}"),
-                SidebarRow::SectionDivider => "divider".to_owned(),
                 SidebarRow::SshSectionHeader { .. } => "ssh-section".to_owned(),
                 other => format!("{other:?}"),
             })
@@ -1211,8 +1207,7 @@ mod tests {
                 "tab1".to_owned(),
                 format!("group:{WORKSPACE_GROUP_KEY}"),
                 "tab0".to_owned(),
-                // 两段都非空 → 分隔行 + 「SSH 主机」子分区头。
-                "divider".to_owned(),
+                // 两段都非空 → 「SSH 主机」子分区头。
                 "ssh-section".to_owned(),
                 "host:ssh:build@10.0.0.7".to_owned(),
                 // 主机内：项目子组在前，兜底子组（cwd 未知）垫底。
@@ -1259,6 +1254,7 @@ mod tests {
     /// 不产出任何 SSH 段元素。
     #[test]
     fn ssh_section_collapse_keeps_only_its_header_and_locals_have_none() {
+        // （段间独立分隔行已撤，2026-11-06：两段相邻处只剩本分区头。）
         let infos = [
             info("D:/local"),
             host_info("build@10.0.0.7", "/srv/pebrel"),
@@ -1270,26 +1266,18 @@ mod tests {
             .map(|row| match row {
                 SidebarRow::GroupHeader { key, .. } => format!("group:{key}"),
                 SidebarRow::Tab { ix } => format!("tab{ix}"),
-                SidebarRow::SectionDivider => "divider".to_owned(),
                 SidebarRow::SshSectionHeader { .. } => "ssh-section".to_owned(),
                 other => format!("{other:?}"),
             })
             .collect();
         assert_eq!(
             kinds,
-            vec![
-                "group:D:/local".to_owned(),
-                "tab0".to_owned(),
-                "divider".to_owned(),
-                "ssh-section".to_owned()
-            ]
+            vec!["group:D:/local".to_owned(), "tab0".to_owned(), "ssh-section".to_owned()]
         );
-        // 纯本地：无 divider、无子分区头。
+        // 纯本地：无子分区头。
         let local_only = [info("D:/a"), info("D:/b")];
         let rows = grouped_rows(&local_only, &HashMap::new(), false);
-        assert!(rows.iter().all(|row| {
-            !matches!(row, SidebarRow::SectionDivider | SidebarRow::SshSectionHeader { .. })
-        }));
+        assert!(rows.iter().all(|row| !matches!(row, SidebarRow::SshSectionHeader { .. })));
     }
 
     #[test]
@@ -1421,10 +1409,11 @@ mod tests {
         let heights: Vec<f32> = rows.iter().map(|row| row_height(row, &metrics)).collect();
         let offsets = row_top_offsets(&heights, 8.0);
         // 视口只露出一级竖线的前 5px：底被夹到视口高，仍存在。竖线顶在
-        // offsets[1]+13=55、底在末子肘形 163，视口 60 → 段 [55, 60]。
+        // offsets[1]+13=47（分区头 26 + gap 8 + 组头半高 13）、底在末子
+        // 肘形 155，视口 60 → 段 [47, 60]。
         let tiny = tree_guides(&rows, &offsets, 0.0, 60.0, &metrics);
         let l1 = tiny.iter().find(|guide| guide.kind == "l1").expect("clipped l1");
-        assert_eq!(l1.bounds.1, 55.0);
+        assert_eq!(l1.bounds.1, 47.0);
         assert_eq!(l1.bounds.1 + l1.bounds.3, 60.0);
         // 组头滚出窗口（first_visible_top 下移）：竖线顶按视口夹取，不出现
         // 负坐标段。

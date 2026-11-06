@@ -149,9 +149,6 @@ impl NebulaWorkspace {
                 SidebarRow::TabsSectionHeader { count, collapsed } => self
                     .render_tabs_section_header(row_w, *count, *collapsed, cx)
                     .into_any_element(),
-                SidebarRow::SectionDivider => self
-                    .render_section_divider(row_w, cx)
-                    .into_any_element(),
                 SidebarRow::SshSectionHeader { count, collapsed } => self
                     .render_ssh_section_header(row_w, *count, *collapsed, cx)
                     .into_any_element(),
@@ -701,14 +698,12 @@ impl NebulaWorkspace {
         let language = crate::gpui_shell::config::ui_language(cx);
         let header_group: SharedString = "sidebar-tabs-header-hover".into();
         let count_text: SharedString = count.to_string().into();
-        let row_height = tab_scroll::tab_row_height(self.density);
         h_flex()
             .id("sidebar-tabs-toggle")
             .debug_selector(|| "sidebar-tabs-toggle".to_owned())
             .group(header_group.clone())
             .w(px(row_w))
-            .h(px(row_height))
-            .pb_1()
+            .h(px(task_groups::SECTION_HEADER_H))
             // 旧壳标题文字从 panel_x + 16px 起；箭头槽自带缩进，这里再补
             // 8px，箭头不会贴住左边缘。
             .pl_2()
@@ -841,19 +836,6 @@ impl NebulaWorkspace {
     /// 本地段与 SSH 段之间的分隔行：垂直居中一条 hairline（与分区头右侧
     /// 延伸线同色源），左右 8px 呼吸。非交互、无命中语义；行宽显式像素
     /// （同条目行的 overflow_hidden 教训）。
-    fn render_section_divider(&self, row_w: f32, cx: &Context<Self>) -> gpui::AnyElement {
-        div()
-            .debug_selector(|| "sidebar-section-divider".to_owned())
-            .w(px(row_w))
-            .h(px(task_groups::SECTION_DIVIDER_H))
-            .flex_shrink_0()
-            .px_2()
-            .flex()
-            .items_center()
-            .child(div().h(px(1.0)).flex_1().bg(crate::gpui_shell::theme::card_divider_color(cx)))
-            .into_any_element()
-    }
-
     /// 「SSH 主机」子分区头行：折叠箭头 + 标题 + 计数，收起全部主机块
     /// （用户 10-19 裁定：本地段在上、SSH 段在下的下段开关）。与「当前
     /// 任务」总头同一解剖与缩进档位，但无 +/⋯ 动作钮（新建终端是本地
@@ -873,13 +855,11 @@ impl NebulaWorkspace {
         let chrome_family = theme.mono_font_family.clone();
         let language = crate::gpui_shell::config::ui_language(cx);
         let count_text: SharedString = count.to_string().into();
-        let row_height = tab_scroll::tab_row_height(self.density);
         h_flex()
             .id("sidebar-ssh-section-toggle")
             .debug_selector(|| "sidebar-ssh-section-toggle".to_owned())
             .w(px(row_w))
-            .h(px(row_height))
-            .pb_1()
+            .h(px(task_groups::SECTION_HEADER_H))
             .pl_2()
             .items_center()
             .cursor_pointer()
