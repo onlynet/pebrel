@@ -120,7 +120,7 @@ impl RecentSessionsState {
 }
 
 /// 最近组的折叠键前缀：组键是 git 根/项目目录，与 cwd/git 根的 TABS 组键
-/// 同源，前缀隔离后共用 [`NebulaWorkspace::sidebar_group_collapsed`]。
+/// 同源，前缀隔离后共用 [`NebulaWorkspace::sidebar_groups`]。
 pub(super) const RECENT_GROUP_KEY_PREFIX: &str = "recent:";
 
 /// 会话列表 → 统一行模型的最近分区段：项目组头 + 会话条目；空数据出一行

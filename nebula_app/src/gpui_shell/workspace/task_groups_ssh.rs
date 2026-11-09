@@ -20,7 +20,7 @@ use super::*;
 use std::time::Instant;
 
 /// 主机键前缀，与 `recent:` 前缀同一约定：与侧栏折叠表
-/// （`sidebar_group_collapsed`）共用键空间，前缀隔离后互不干扰。
+/// （`sidebar_groups`）共用键空间，前缀隔离后互不干扰。
 pub(super) const HOST_KEY_PREFIX: &str = "ssh:";
 /// 主机键与子组路径段的分隔符（只拼不解）。
 const KEY_PATH_SEPARATOR: char = '|';
@@ -241,7 +241,7 @@ impl NebulaWorkspace {
     /// SSH 主机头行：chevron + 服务器图标 + 「SSH {目的地}」名 + 计数。与
     /// 项目组头同一解剖（`render_group_header`），差异只有三处表达层级：服务
     /// 器图标、名字走 `ssh_host` 词典词条（不加 `[ ]` 括号）、无分支 chip。
-    /// 折叠键为主机键，与子组键共用 [`NebulaWorkspace::sidebar_group_collapsed`]。
+    /// 折叠键为主机键，与子组键共用 [`NebulaWorkspace::sidebar_groups`]。
     pub(super) fn render_ssh_host_header(
         &self,
         row_w: f32,

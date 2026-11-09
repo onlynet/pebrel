@@ -197,6 +197,23 @@ impl Settings {
         Self::load_with_runtime(theme, RuntimeSettings::load())
     }
 
+    /// UI 测试基准：钉死出厂默认（界面字号 15px、经典侧栏），隔离本机持久
+    /// 化设置——`Settings::load` 读真实 RuntimeSettings，本机 `ui_font_size=13`
+    /// 或 `ai_agent_sidebar=1` 会改变行高与渲染路径，布局断言按出厂基准设计
+    /// （2026-11-06 修复 ui_tests 4 个环境敏感失败；2026-11-09 收敛为共享
+    /// 实现，扩展到 spinner/transfer 两族）。装载时序合同：init 内部会从真实
+    /// 持久化重新 set_global，必须装在 init 之后；窗口首帧外观回调
+    /// （observe_window_appearance → apply_runtime_settings）还会再覆盖一次，
+    /// 窗口就绪后须重装（先例见 settings_navigation::ui_tests）。
+    #[cfg(test)]
+    pub(crate) fn factory_baseline_settings() -> Self {
+        let mut settings = Self::load(nebula_settings::ThemeName::Nord);
+        settings.ui_font_size_px = 15.0;
+        settings.ui_font_size_override = None;
+        settings.ai_agent_sidebar = false;
+        settings
+    }
+
     /// Load from the exact runtime snapshot that was just persisted.  Settings
     /// panes use this entry point to avoid resolving the old theme between the
     /// write and the global cache update.

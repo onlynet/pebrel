@@ -639,7 +639,7 @@ pub struct NebulaWorkspace {
     /// 揭示意图：事件路径只置位，render 侧行模型换算窗口（`rows_window`）。
     tabs_scroll_pending_reveal: bool,
     /// 经典侧栏的 TABS 卷帘折叠动画状态（与上游同名字段，`sidebar.rs`
-    /// 经典路径读写；分组树路径的折叠状态在 `sidebar_group_collapsed`）。
+    /// 经典路径读写；分组树路径的折叠状态在 `sidebar_groups.collapsed`）。
     tabs_fold_armed: bool,
     /// 折叠/展开动画期间冻结视口高度：旧壳 `tabs_avail` 来自面板剩余高度，
     /// 绝不把卷帘裁剪量回去再算窗口，否则溢出列表会被锁成一行滚动区。
@@ -651,9 +651,9 @@ pub struct NebulaWorkspace {
     tabs_list_origin: gpui::Point<gpui::Pixels>,
     tabs_scroll_grab: Option<f32>,
     tabs_list_hot: bool,
-    /// 侧栏分组的折叠状态与 cwd→组键缓存：分组是呈现（不持久化），git
-    /// 根探测只在事件路径（`resolve_project_group`），render 永远只查内存。
-    sidebar_group_collapsed: HashMap<SharedString, bool>,
+    /// 侧栏分组呈现状态（折叠表 + 组头 tooltip 的 chip 悬停标志，定义与
+    /// 合同见 [`task_groups::SidebarGroupState`]）：分组是呈现（不持久化）。
+    sidebar_groups: task_groups::SidebarGroupState,
     project_group_cache: HashMap<String, task_groups::LocalProject>,
     /// SSH 组头分支 chip 的 LWW 状态，见 [`task_groups_ssh::SshGroupHeads`]。
     ssh_group_heads: task_groups_ssh::SshGroupHeads,
@@ -934,7 +934,7 @@ impl NebulaWorkspace {
             tabs_list_origin: gpui::point(px(0.0), px(0.0)),
             tabs_scroll_grab: None,
             tabs_list_hot: false,
-            sidebar_group_collapsed: HashMap::new(),
+            sidebar_groups: Default::default(),
             project_group_cache: HashMap::new(),
             ssh_group_heads: Default::default(),
             recent_sessions: Default::default(),

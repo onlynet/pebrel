@@ -1,16 +1,10 @@
 use super::super::*;
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
-/// 测试基准设置：钉死出厂默认（界面字号 15px、经典侧栏），隔离本机持久
-/// 化设置——`Settings::load` 读真实 RuntimeSettings，本机 `ui_font_size=13`
-/// 或 `ai_agent_sidebar=1` 会改变行高与渲染路径，而本文件的布局断言全部
-/// 按出厂基准设计（2026-11-06 修复 4 个环境敏感失败）。
+/// 测试基准设置：共享实现见 [`crate::gpui_shell::config::Settings::
+/// factory_baseline_settings`]（钉出厂默认，隔离本机持久化）。
 fn baseline_settings() -> crate::gpui_shell::config::Settings {
-    let mut settings = crate::gpui_shell::config::Settings::load(nebula_settings::ThemeName::Nord);
-    settings.ui_font_size_px = 15.0;
-    settings.ui_font_size_override = None;
-    settings.ai_agent_sidebar = false;
-    settings
+    crate::gpui_shell::config::Settings::factory_baseline_settings()
 }
 
 fn open_workspace(
@@ -631,10 +625,10 @@ fn sidebar_groups_tabs_under_a_collapsible_header(cx: &mut TestAppContext) {
     cx.run_until_parked();
     workspace.read_with(&cx, |workspace, _| {
         assert!(
-            !workspace.sidebar_group_collapsed.is_empty(),
+            !workspace.sidebar_groups.collapsed.is_empty(),
             "clicking the header must record the collapse"
         );
-        assert!(workspace.sidebar_group_collapsed.values().all(|collapsed| *collapsed));
+        assert!(workspace.sidebar_groups.collapsed.values().all(|collapsed| *collapsed));
     });
     let header_again = tab_bounds("sidebar-group-workspace", &mut cx);
     assert!(cx.debug_bounds("sidebar-tab-0").is_none(), "collapsed group hides its entries");
@@ -796,19 +790,19 @@ fn sidebar_group_branch_chip_hovers_the_full_branch_name(cx: &mut TestAppContext
         hover_for(cx, point, std::time::Duration::from_millis(600));
     };
 
-    // 分支 chip 零延迟：行级 500ms 还没到期，分支名已经直接显示——不会先
-    // 闪一下「折叠分组」再换成分支名（用户 10-20 追加裁定）。
+    // 共享时钟（用户 2026-11-09 裁定）：chip 不再有独立的零延迟提示，与
+    // 行级共用同一 500ms 驻留——到期前行上任何位置都不显示。
     hover_for(&mut cx, local_chip_bounds.center(), std::time::Duration::from_millis(100));
     assert!(
-        cx.debug_bounds("sidebar-group-branch-tip").is_some(),
-        "the branch tooltip shows immediately, before the row-level delay"
+        cx.debug_bounds("sidebar-group-branch-tip").is_none(),
+        "the branch tooltip waits for the shared 500ms dwell"
     );
     assert!(
         cx.debug_bounds("sidebar-group-tip").is_none(),
-        "the row-level collapse tooltip never preempts the chip"
+        "the row-level collapse tooltip also waits for the same dwell"
     );
 
-    // 两个延迟都过后仍以分支提示为先。
+    // 驻留到期：chip 上给完整分支名，行级默认让位。
     hover(&mut cx, local_chip_bounds.center());
     assert!(
         cx.debug_bounds("sidebar-group-branch-tip").is_some(),
@@ -831,7 +825,44 @@ fn sidebar_group_branch_chip_hovers_the_full_branch_name(cx: &mut TestAppContext
         "hovering elsewhere on the header keeps the collapse tooltip"
     );
 
-    // SSH 主机下的项目子组同规则。
+    // 驻留已满足后内容跟随指针位置即时切换（共享时钟，无二次等待）：
+    // name→chip 立即变分支名，chip→name 立即恢复行级默认。
+    hover_for(&mut cx, local_chip_bounds.center(), std::time::Duration::ZERO);
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_some(),
+        "switches to the full-branch tooltip instantly once the dwell is satisfied"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_none(),
+        "the collapse tooltip yields the instant the pointer enters the chip"
+    );
+    hover_for(&mut cx, name_point, std::time::Duration::ZERO);
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_none(),
+        "the branch tooltip yields the instant the pointer leaves the chip"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_some(),
+        "the collapse tooltip restores instantly elsewhere on the header"
+    );
+
+    // 早划入：行内先停 100ms 再上 chip，驻留照常累计满 500ms 即给分支名
+    //（分支内容不重新起算 chip 驻留）。先移到 SSH 组行重置本行 tooltip
+    //（驻留已满足的 Visible 状态不会重新计时）。
+    hover_for(&mut cx, ssh_chip_bounds.center(), std::time::Duration::ZERO);
+    hover_for(&mut cx, name_point, std::time::Duration::from_millis(100));
+    hover_for(&mut cx, local_chip_bounds.center(), std::time::Duration::from_millis(400));
+    assert!(
+        cx.debug_bounds("sidebar-group-branch-tip").is_some(),
+        "the shared dwell counts time hovered anywhere on the row"
+    );
+    assert!(
+        cx.debug_bounds("sidebar-group-tip").is_none(),
+        "no collapse-tooltip interlude on the way into the chip"
+    );
+
+    // SSH 主机下的项目子组同规则。本步从本地 chip 直接移到 SSH chip，同时
+    // 守住两个 chip 的一次性转移：后派发的 false 不得覆盖新 chip 的键。
     hover(&mut cx, ssh_chip_bounds.center());
     assert!(
         cx.debug_bounds("sidebar-group-branch-tip").is_some(),

@@ -31,6 +31,17 @@ use super::*;
 /// 绝不会与真实组键撞车——本地 cwd 恒为绝对路径、SSH 键是目的地串。
 pub(super) const WORKSPACE_GROUP_KEY: &str = "workspace";
 
+/// 侧栏分组的呈现状态（住在 workspace 上，不持久化，render 只查内存）：
+/// - `collapsed`：组头折叠表，`toggle_sidebar_group` 翻转；
+/// - `chip_hover`：共享时钟组头 tooltip 的指针位置（组键，2026-11-09
+///   裁定）——`Some`＝指针正停在该组截断的分支 chip 上，由 chip 的
+///   on_hover 维护；组头行级 tooltip 观察实体按它即时切换内容。
+#[derive(Default)]
+pub(super) struct SidebarGroupState {
+    pub(super) collapsed: HashMap<SharedString, bool>,
+    pub(super) chip_hover: Option<SharedString>,
+}
+
 /// 组头行高（逻辑 px）。比条目矮一档：它是分类标签，不是命中目标优先级
 /// 最高的条目，但 26px 仍高于 20px 的最小命中区起点。
 pub(super) const GROUP_HEADER_H: f32 = 26.0;
@@ -773,7 +784,7 @@ impl NebulaWorkspace {
     pub(super) fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
         let infos: Vec<TabGroupInfo> =
             (0..self.tabs.len()).map(|ix| self.tab_group_info(ix, cx)).collect();
-        grouped_rows(&infos, &self.sidebar_group_collapsed, self.ssh_section_collapsed)
+        grouped_rows(&infos, &self.sidebar_groups.collapsed, self.ssh_section_collapsed)
     }
 
     /// 统一侧栏列表的行模型：两个分区头与其内容展开成**一个**序列，由单一
@@ -795,7 +806,7 @@ impl NebulaWorkspace {
             });
             rows.extend(recent_sessions::recent_sidebar_rows(
                 self.recent_sessions.groups(),
-                &self.sidebar_group_collapsed,
+                &self.sidebar_groups.collapsed,
                 self.recent_sessions.is_scanning_empty(),
             ));
         }
@@ -805,9 +816,10 @@ impl NebulaWorkspace {
     /// 组头行：文件夹图标 + 项目名 + 分支 chip + tab 数 + 折叠箭头。
     /// 行宽必须显式像素（同 tab 行的教训：容器 overflow_hidden 下 w_full
     /// 会回落 shrink-to-fit）。SSH 主机下的项目子组不缩进（用户 10-13
-    /// 裁定），与本地组同几何：箭头中心落在 [`TREE_X_L1`]。悬浮命中分两级
-    /// （用户 10-20 裁定）：分支 chip 给完整分支名，行上其余位置给行级
-    /// 「折叠分组」默认——两种组（本地/SSH 子组）共用本渲染。
+    /// 裁定），与本地组同几何：箭头中心落在 [`TREE_X_L1`]。悬浮提示为共享
+    /// 时钟（用户 2026-11-09 裁定）：行驻留 500ms 解锁后内容跟随指针位置，
+    /// 截断 chip 上给完整分支名，行上其余位置给行级「折叠分组」默认——
+    /// 两种组（本地/SSH 子组）共用本渲染。
     pub(super) fn render_group_header(
         &self,
         row_w: f32,
@@ -862,13 +874,41 @@ impl NebulaWorkspace {
             .cursor_pointer()
             .text_color(muted)
             .hover(|style| style.bg(hover_bg))
-            .tooltip(move |window, cx| {
-                tab_presentation::tooltip_with_selector(
-                    tooltip.into(),
-                    "sidebar-group-tip",
-                    window,
-                    cx,
-                )
+            // 共享时钟（用户 2026-11-09 裁定）：行级 tooltip 是唯一计时器
+            //（默认 500ms），到期后内容跟随指针位置——不在 chip 上给行级
+            // 「折叠分组」默认；在本行截断 chip 上即时切完整分支名。视图
+            // 观察 workspace 实体：chip 的 on_hover 翻转标志 → notify →
+            // 重渲（内容闭包随帧重评，见 reactive_tooltip_with_selector）。
+            .tooltip({
+                let workspace = cx.entity();
+                let group_key = key.clone();
+                let branch_text = branch.clone();
+                let label: SharedString = tooltip.into();
+                move |_, cx| {
+                    let observed = workspace.clone();
+                    let workspace = workspace.clone();
+                    let group_key = group_key.clone();
+                    let branch_text = branch_text.clone();
+                    let label = label.clone();
+                    tab_presentation::reactive_tooltip_with_selector(
+                        &observed,
+                        move |cx| {
+                            let on_chip = workspace
+                                .read(cx)
+                                .sidebar_groups
+                                .chip_hover
+                                .as_deref()
+                                == Some(group_key.as_ref());
+                            match (on_chip, branch_text.as_ref()) {
+                                (true, Some(branch)) => {
+                                    (branch.clone(), "sidebar-group-branch-tip")
+                                }
+                                _ => (label.clone(), "sidebar-group-tip"),
+                            }
+                        },
+                        cx,
+                    )
+                }
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_sidebar_group(toggle_key.clone(), cx);
@@ -910,29 +950,27 @@ impl NebulaWorkspace {
                     .child(name_text),
             )
             // 分支块整体在项目名右侧（间隔略大），图标与文字同一前景色。
-            // chip 文本截断在 40% 行宽内，长分支读不全：悬浮到 chip 上给完整
-            // 分支名，行上其余位置保持行级「折叠分组」默认（用户 10-20
-            // 裁定）。真被截断才挂 chip 提示（用户 10-23 需求）：未截断时
-            // 必须**不挂**而不是挂空提示——空提示仍会占掉显示位、压住行级
-            // 默认，就不是「恢复原样」了。两条规则各有一半靠 gpui 的机制：
-            // - chip 的 tooltip **零延迟**：指针进 chip 即显示，赶在行级
-            //   500ms 延迟到期前占住显示位——否则指针从行内其他位置一路
-            //   划进 chip 时，会先闪一下「折叠分组」再换成分支名（用户
-            //   10-20 追加裁定：直接展示，不出两级提示的序列）。
-            // - 优先级：chip 是行 tooltip 的子元素，prepaint 晚于行、窗口
-            //   取最后注册的 tooltip，子级提示盖过行级默认，不必关行 tooltip。
+            // chip 文本截断在 40% 行宽内，长分支读不全。共享时钟 tooltip
+            //（用户 2026-11-09 裁定，取代 10-20 的零延迟 chip 提示）：行驻留
+            // 500ms 解锁后内容跟随指针位置即时切换——chip 上给完整分支名，
+            // 行上其余位置给行级「折叠分组」默认。实现分工：
+            // - 截断的 chip 只挂 on_hover，把指针位置写进 workspace 的
+            //   `sidebar_groups.chip_hover`（组键）；不挂自己的 tooltip，
+            //   也就没有第二套驻留计时。
+            // - 行级 tooltip（唯一计时器）按标志选内容；未截断时标志永不
+            //   置位，行级默认在 chip 上照常出现（用户 10-23 裁定保持）。
             // 截断判定在 build 时算：chip 文本可用宽 = 40% 行宽 − 分支图标
             // − 图标与文本的 3px 间隔（常量都在本函数内），全文固有宽超过
             // 它才会出省略号；字体用主题默认——chip 文本不覆盖 family，
             // 继承的是 Root 主题字体。
             .when_some(branch.as_ref(), |row, branch| {
-                let branch_tooltip = branch.clone();
                 let branch_truncated = tab_presentation::text_line_width(
                     window.text_system(),
                     branch,
                     gpui::font(theme.font_family.clone()),
                     px(label_px * SIDEBAR_TAG_SCALE),
                 ) > px(row_w * 0.4 - GROUP_BRANCH_ICON_SIZE - 3.0);
+                let chip_hover_key = key.clone();
                 row.child(
                     h_flex()
                         .id(("sidebar-group-branch", row_ix))
@@ -944,15 +982,26 @@ impl NebulaWorkspace {
                         .items_center()
                         .text_color(theme.warning)
                         .when(branch_truncated, |chip| {
-                            chip.tooltip_show_delay(std::time::Duration::ZERO)
-                                .tooltip(move |window, cx| {
-                                    tab_presentation::tooltip_with_selector(
-                                        branch_tooltip.clone(),
-                                        "sidebar-group-branch-tip",
-                                        window,
-                                        cx,
-                                    )
-                                })
+                            chip.on_hover(cx.listener(
+                                move |this, hovered: &bool, _, cx| {
+                                    // 同一次 mouse-move 里两个 chip 的翻转次序
+                                    // 不定（bubble 按注册逆序派发）：清零只认
+                                    // 自己的键，避免后跑的 false 覆盖别的 chip
+                                    // 刚写入的 true。
+                                    let current = this.sidebar_groups.chip_hover.clone();
+                                    let next = match (*hovered, current.as_deref()) {
+                                        (true, _) => Some(chip_hover_key.clone()),
+                                        (false, Some(k)) if k == chip_hover_key.as_ref() => {
+                                            None
+                                        }
+                                        (false, _) => current,
+                                    };
+                                    if this.sidebar_groups.chip_hover != next {
+                                        this.sidebar_groups.chip_hover = next;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
                         })
                         .child(
                             Icon::new(Icon::empty())
@@ -985,7 +1034,7 @@ impl NebulaWorkspace {
 
     /// 折叠/展开一个项目分组。组行数随之变化，就地精确钳制滚动窗口。
     pub(super) fn toggle_sidebar_group(&mut self, key: SharedString, cx: &mut Context<Self>) {
-        let collapsed = self.sidebar_group_collapsed.entry(key).or_insert(false);
+        let collapsed = self.sidebar_groups.collapsed.entry(key).or_insert(false);
         *collapsed = !*collapsed;
         // 行移位，右键菜单锚定的那一行不在原处了（同 `toggle_tabs_section`）。
         self.tab_menu = None;

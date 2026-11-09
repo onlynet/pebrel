@@ -1,5 +1,7 @@
 //! Shared tab names, task details and identity for sidebar and top tabs.
 
+use gpui::AppContext as _;
+
 use super::*;
 
 /// 标签元数据：用户名字、色标沿用 session v4；运行时身份只随活体标签移动，
@@ -263,6 +265,30 @@ pub(super) fn tooltip_with_selector(
             .child(text.clone())
     })
     .build(window, cx)
+}
+
+/// [`tooltip_with_selector`] 的反应式变体：视图观察 `observed` 实体，实体
+/// 每次 notify 都重渲，内容闭包随帧重评——组头的「共享时钟」tooltip 用它
+/// 跟随指针位置在分支名与行级默认之间切换（2026-11-09 裁定），切换内容
+/// 不需要重建视图。
+pub(super) fn reactive_tooltip_with_selector<W: 'static>(
+    observed: &Entity<W>,
+    content: impl Fn(&App) -> (SharedString, &'static str) + 'static,
+    cx: &mut App,
+) -> gpui::AnyView {
+    let observed = observed.clone();
+    cx.new(|cx| {
+        cx.observe(&observed, |_, _, cx| cx.notify()).detach();
+        gpui_component::tooltip::Tooltip::element(move |_, cx| {
+            let (text, selector) = content(cx);
+            div()
+                .debug_selector(move || selector.to_owned())
+                .max_w(px(560.0))
+                .whitespace_normal()
+                .child(text)
+        })
+    })
+    .into()
 }
 
 /// 单行文本按指定字体与字号的完整渲染宽度（不换行、不截断时的固有宽）。
