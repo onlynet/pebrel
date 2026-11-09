@@ -214,6 +214,10 @@ mod tests {
             windowing::initialize(cx, crate::runtime_api::RuntimeHub::new());
             cx.set_reduce_motion(true);
             snapshot_probe::enable(cx);
+            // 基准必须装在 init 之后（init 内部从真实持久化重装 Settings）；
+            // 本文件断言经典侧栏徽章（sidebar-tab 行 + spinner_visible），
+            // 本机 ai_agent_sidebar=1 会走分组树路径让徽章消失（2026-11-09）。
+            cx.set_global(crate::gpui_shell::config::Settings::factory_baseline_settings());
         });
         let mut workspace = None;
         let mut terminals = Vec::new();
@@ -282,6 +286,11 @@ mod tests {
         let mut window = window.clone();
         window.update(|window, _| window.activate_window());
         window.run_until_parked();
+        // 窗口首帧外观回调会用真实持久化覆盖测试基准，就绪后重装（先例：
+        // settings_navigation::ui_tests）。
+        window.update(|_, cx| {
+            cx.set_global(crate::gpui_shell::config::Settings::factory_baseline_settings())
+        });
         window.update(|window, cx| {
             assert!(window.is_window_active());
             assert!(terminals[0].read(cx).focus_handle.is_focused(window));

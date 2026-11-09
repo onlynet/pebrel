@@ -127,7 +127,17 @@ impl server::Handler for Loopback {
             return session.channel_failure(channel);
         }
         if command == resume::probe_command().as_bytes() {
-            if matches!(self.mode, Mode::Integration | Mode::RejectIntegration) {
+            // edited-assets 两态模拟的是「远端被用户改过」的**健康**主机，
+            // 嵌套引用探测必须应答——97d47f09 之后上游先验引用再 prepare，
+            // 不应答会让委托路径整体跳过 prepare，测不到「上游 plan 同样
+            // 失败 → 回退」的语义（2026-11-09 修复）。
+            if matches!(
+                self.mode,
+                Mode::Integration
+                    | Mode::RejectIntegration
+                    | Mode::EditedAssetsWithRcfile
+                    | Mode::EditedAssetsBare
+            ) {
                 session.channel_success(channel)?;
                 session.data(channel, resume::PROBE_REPLY)?;
                 session.exit_status_request(channel, 0)?;
@@ -192,6 +202,16 @@ impl server::Handler for Loopback {
             );
         let upstream_dispatch = command.starts_with(b"sh -c ")
             && matches!(self.mode, Mode::Integration | Mode::RejectIntegration);
+        // integrated startup（`sh -c` 包 PEBREL_PTY 标记）在 edited-assets
+        // 主机上必须被拒：资产被改/rcfile 从未装过，远端没有可用的集成
+        // shell；拒绝后委托路径才走「普通登录 shell 回退」（快路径自己的
+        // `exec ` dispatch 不带该标记，不受影响）。
+        if matches!(self.mode, Mode::EditedAssetsWithRcfile | Mode::EditedAssetsBare)
+            && command.starts_with(b"sh -c ")
+            && std::str::from_utf8(command).is_ok_and(|command| command.contains("PEBREL_PTY_"))
+        {
+            return session.channel_failure(channel);
+        }
         if fast_dispatch || upstream_dispatch {
             self.data.send(b"bootstrap".to_vec()).unwrap();
             if self.mode == Mode::RejectIntegration
@@ -889,7 +909,9 @@ fn edited_assets_without_rcfile_still_fall_back() {
             open_shell(&acquired, size(), Some("/requested"), None, &Events::default())
                 .await
                 .unwrap();
-        // 快路径 snapshot + 委托后的上游 snapshot（plan 都在资产保护上失败）→ 回退。
+        // 快路径 snapshot + 委托后的上游 snapshot（plan 都在资产保护上失败，
+        // 97d47f09 后引用探测由 fixture 应答才能走到）→ startup 被拒 → 回退
+        // 普通登录 shell。
         for expected in [b"snapshot".as_slice(), b"snapshot", b"cd '/requested'\r"] {
             assert_eq!(fixture.data.recv().await.unwrap(), expected);
         }

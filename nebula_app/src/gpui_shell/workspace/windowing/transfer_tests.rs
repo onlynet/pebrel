@@ -10,6 +10,9 @@ pub(super) fn initialize_test(cx: &mut TestAppContext) {
         crate::gpui_shell::file_editor::init(cx);
         super::super::init(cx);
         initialize(cx, crate::runtime_api::RuntimeHub::new());
+        // 拖拽测试命中的是经典侧栏 tab 行（sidebar-tab-N），本机
+        // ai_agent_sidebar=1 会换成分组树让行选择器消失（2026-11-09）。
+        cx.set_global(crate::gpui_shell::config::Settings::factory_baseline_settings());
     });
 }
 
@@ -366,6 +369,12 @@ fn alt_drag_survives_nc_move_and_tears_out_via_real_events(cx: &mut TestAppConte
     visual.update(|window, cx| {
         window.draw(cx).clear(cx);
     });
+    // 窗口首帧外观回调会用真实持久化覆盖测试基准（本机 ai_agent_sidebar=1
+    // 切到分组树后经典侧栏行的监听器不再绘制，拖拽手势断裂）；首帧后重装
+    // 基准（同 settings_navigation::ui_tests 的两段式装载）。
+    visual.update(|_, cx| {
+        cx.set_global(crate::gpui_shell::config::Settings::factory_baseline_settings());
+    });
     let row = visual.debug_bounds("sidebar-tab-1").expect("sidebar tab row must render");
     let start = row.center();
     let at = |dy: f32| gpui::Point::new(start.x, start.y + gpui::px(dy));
@@ -418,6 +427,10 @@ fn release_outside_source_window_tears_out_without_alt(cx: &mut TestAppContext) 
     let mut visual = gpui::VisualTestContext::from_window(handle, cx);
     visual.update(|window, cx| {
         window.draw(cx).clear(cx);
+    });
+    // 同 alt_drag：首帧外观回调会覆盖测试基准，首帧后重装。
+    visual.update(|_, cx| {
+        cx.set_global(crate::gpui_shell::config::Settings::factory_baseline_settings());
     });
     let row = visual.debug_bounds("sidebar-tab-1").expect("sidebar tab row must render");
     let start = row.center();
