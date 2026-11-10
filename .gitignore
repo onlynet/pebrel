@@ -51,6 +51,8 @@ assets/windows/conhost/
 !/docs/screenshots/*.jpg
 !/docs/screenshots/*.jpeg
 !/docs/screenshots/*.webp
+!/docs/superpowers/
+!/docs/superpowers/**
 
 /*.html
 /*.htm
@@ -153,3 +155,4 @@ dist-pack-*/
 NebulaTerminal-*/
 *-preview-package/
 /.agents/
+.superpowers/
