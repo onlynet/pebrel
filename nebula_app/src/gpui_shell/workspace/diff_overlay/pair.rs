@@ -19,6 +19,8 @@ pub(super) struct LineCell {
     pub kind: crate::native_result_model::diff::Kind,
 }
 
+/// split 模式一行：两侧可空（短侧补位）；`band` 为 Some 时是整行横带
+/// （hunk 头/注记），左右均为 None。
 #[derive(Clone, Debug)]
 pub(super) struct SplitPair {
     pub band: Option<String>,
@@ -86,18 +88,18 @@ pub(super) fn split_rows(file: &File) -> Vec<SplitPair> {
     out
 }
 
-/// 把已积累的 Deleted/Added 段按位配对，短侧补 None。
+/// 把已积累的 Deleted/Added 段按位配对，短侧补 None。drain 逐个移出：
+/// 不再为每个单元格整体 clone。
 fn flush_pair(out: &mut Vec<SplitPair>, deleted: &mut Vec<LineCell>, added: &mut Vec<LineCell>) {
-    let n = deleted.len().max(added.len());
-    for ix in 0..n {
-        out.push(SplitPair {
-            band: None,
-            left: deleted.get(ix).cloned(),
-            right: added.get(ix).cloned(),
-        });
+    let mut deleted = deleted.drain(..);
+    let mut added = added.drain(..);
+    loop {
+        let (left, right) = (deleted.next(), added.next());
+        if left.is_none() && right.is_none() {
+            break;
+        }
+        out.push(SplitPair { band: None, left, right });
     }
-    deleted.clear();
-    added.clear();
 }
 
 /// 未跟踪文件全文按新增行（行号从 1 起，右侧列）。截断提示由渲染层追加。
@@ -190,6 +192,24 @@ mod tests {
         assert!(pairs[0].left.is_some() && pairs[0].right.is_none());
         assert!(pairs[1].band.is_some() && pairs[1].left.is_none());
         assert!(pairs[2].left.is_none() && pairs[2].right.is_some());
+    }
+
+    #[test]
+    fn split_context_rows_keep_independent_line_numbers() {
+        let rows = vec![Row { old: Some(3), new: Some(5), kind: Kind::Context }];
+        let pairs = split_rows(&file(rows, " ctx"));
+        let pair = &pairs[0];
+        assert_eq!(pair.left.as_ref().unwrap().no, Some(3));
+        assert_eq!(pair.right.as_ref().unwrap().no, Some(5));
+    }
+
+    #[test]
+    fn note_row_renders_as_band_with_text() {
+        let rows = vec![Row { old: None, new: None, kind: Kind::Note }];
+        let pairs = split_rows(&file(rows, "\\ No newline at end of file"));
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].band.as_deref(), Some("\\ No newline at end of file"));
+        assert!(pairs[0].left.is_none() && pairs[0].right.is_none());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Git diff 浮层：盖在中间终端卡上的全幅对比视图。
 //!
 //! 生命周期独立于 tab——打开不建任务条目、关闭不动终端；数据按点击惰性获取，
-//! generation 递增作废晚到响应（与 remote_git 同一合同）。本文件先落状态机
-//! 与挂载几何；行渲染（Task 6-8）与关闭路径（Task 9）随后续任务填充。
+//! generation 递增作废晚到响应（与 remote_git 同一合同）。行渲染按 mode 分派
+//! （unified/split，默认 split 左右对比）；关闭路径（Task 9）随后续任务填充。
 use super::*;
 use crate::display::side_panel::GitInfo;
 use crate::i18n::Message;
@@ -107,6 +107,12 @@ impl DiffOverlayState {
     fn force_seen_snapshot(&mut self, snapshot: Option<Arc<GitInfo>>) {
         self.seen_snapshot = snapshot;
     }
+
+    /// 测试探针：滚到列表末尾（模式切换后末行可达性的回归断言用）。
+    #[cfg(test)]
+    fn overlay_scroll_to_end(&mut self) {
+        self.scroll.scroll_to_end();
+    }
 }
 
 impl NebulaWorkspace {
@@ -183,9 +189,10 @@ impl NebulaWorkspace {
             Err(()) => Phase::Error,
         };
         // 列表计数只在落地时可知；这里同步 reset，避免渲染路径改 ListState。
+        // 计数按当时模式的行形态取（loaded_item_count 与模式切换共用）。
         // uniform 高度提示：未测量项按 22px 计，否则滚动条按已测范围钳制。
         let item_count = match &self.diff_overlay.phase {
-            Phase::Loaded(loaded) => Some(loaded.rows.len()),
+            Phase::Loaded(loaded) => Some(loaded_item_count(loaded, self.diff_overlay.mode)),
             Phase::Raw { lines, .. } => Some(lines.len()),
             _ => None,
         };
@@ -201,6 +208,23 @@ impl NebulaWorkspace {
         self.diff_overlay.phase = Phase::Loading;
         self.diff_overlay.generation = self.diff_overlay.generation.wrapping_add(1);
         fetch::spawn(self.diff_overlay.generation, &target, cx);
+        cx.notify();
+    }
+
+    /// 布局切换只改视图偏好：不动 generation/phase（两种行形态都在 Loaded
+    /// 里）。列表计数随行形态重置——pair 压缩使 pairs ≤ rows 恒成立，若沿
+    /// 用旧计数，split→unified 会把尾部 unified 行挡在计数之外永不渲染；
+    /// 计数重置连带位置回顶（模式持久即可，滚动位置不跨切换保留）。
+    /// 同模式重复点击是 no-op（不重置计数/滚动）。
+    fn toggle_diff_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {
+        if mode == self.diff_overlay.mode {
+            return;
+        }
+        self.diff_overlay.mode = mode;
+        if let Phase::Loaded(loaded) = &self.diff_overlay.phase {
+            let count = loaded_item_count(loaded, mode);
+            self.diff_overlay.scroll.reset_with_uniform_height(count, px(22.0));
+        }
         cx.notify();
     }
 
@@ -315,7 +339,44 @@ impl NebulaWorkspace {
                             div().text_xs().text_color(theme.muted_foreground).child(label),
                         )
                     })
-                    // 模式切换（Task 8）与关闭按钮（Task 9）随后续任务填充。
+                    // 布局切换（split/unified）：SegmentedRow 滑块复用 vcs_panel
+                    // 视图切换的构造模式。无图标——label 常显（label-when-active
+                    // 会让未选侧成空钮）。
+                    .child(crate::gpui_shell::widgets::segmented::SegmentedRow::new(
+                        "diff-mode",
+                        match self.diff_overlay.mode {
+                            DiffMode::Split => 0,
+                            DiffMode::Unified => 1,
+                        },
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("diff-mode-split")
+                                    .label(language.text(Message::VcsDiffModeSplit))
+                                    .debug_selector(|| "diff-mode-split".to_string())
+                                    .ghost()
+                                    .small()
+                                    .toggled(self.diff_overlay.mode == DiffMode::Split)
+                                    .tooltip(language.text(Message::VcsDiffModeSplit))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_diff_mode(DiffMode::Split, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("diff-mode-unified")
+                                    .label(language.text(Message::VcsDiffModeUnified))
+                                    .debug_selector(|| "diff-mode-unified".to_string())
+                                    .ghost()
+                                    .small()
+                                    .toggled(self.diff_overlay.mode == DiffMode::Unified)
+                                    .tooltip(language.text(Message::VcsDiffModeUnified))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_diff_mode(DiffMode::Unified, cx);
+                                    })),
+                            ),
+                        div().rounded(theme.radius).bg(theme.tokens.secondary_active),
+                    ))
+                    // 关闭按钮（Task 9 接管交互）。
                     .child(
                         div()
                             .id("diff-close")
@@ -361,7 +422,7 @@ impl NebulaWorkspace {
                             })),
                     )
                     .into_any_element(),
-                // Task 7 只渲染 unified（mode 切换在 Task 8 接管分派）。
+                // Loaded/Raw 共用滚动体；行形在 render_overlay_row 按 mode 分派。
                 Phase::Loaded(loaded) => {
                     let tail = truncated_tail(language, loaded.truncated);
                     self.render_scrolled_overlay_body(tail, cx).into_any_element()
@@ -415,12 +476,17 @@ impl NebulaWorkspace {
             })
     }
 
-    /// 虚拟列表行：Loaded → unified 行（Task 7 只此一种）；Raw → 等宽原文。
+    /// 虚拟列表行：Loaded 按 mode 分派（split → 配对行，unified → 行模型），
+    /// 越界槽位（模式切换后计数差异的残留）画空行；Raw → 等宽原文。
     fn render_overlay_row(&mut self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
-        let (row, raw) = match &self.diff_overlay.phase {
-            Phase::Loaded(loaded) => (loaded.rows.get(index), None),
-            Phase::Raw { lines, .. } => (None, lines.get(index)),
+        let mode = self.diff_overlay.mode;
+        let (row, pair, raw) = match &self.diff_overlay.phase {
+            Phase::Loaded(loaded) => match mode {
+                DiffMode::Unified => (loaded.rows.get(index), None, None),
+                DiffMode::Split => (None, loaded.pairs.get(index), None),
+            },
+            Phase::Raw { lines, .. } => (None, None, lines.get(index)),
             _ => return div().into_any_element(),
         };
         if let Some(line) = raw {
@@ -438,27 +504,16 @@ impl NebulaWorkspace {
                 .child(line.clone())
                 .into_any_element();
         }
+        if let Some(pair) = pair {
+            return split_row(index, pair, theme);
+        }
         let Some(row) = row else { return div().into_any_element() };
         match row {
-            pair::DisplayRow::FullWidth { text } => {
-                // hunk 头高亮；note（"\ No newline..."）按弱化说明处理。
-                // 带 hunk 上下文的头可达数百字符：单行截断，不换行不撑高。
-                let hunk = text.starts_with("@@");
-                h_flex()
-                    .id(SharedString::from(format!("diff-overlay-row-unified-{index}")))
-                    .debug_selector(move || format!("diff-overlay-row-unified-{index}"))
-                    .w_full()
-                    .px_3()
-                    .h(px(22.0))
-                    .flex_shrink_0()
-                    .items_center()
-                    .when(hunk, |row| row.bg(theme.primary.opacity(0.08)))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(theme.font_size - px(1.0))
-                    .text_color(if hunk { theme.primary } else { theme.muted_foreground })
-                    .child(div().flex_1().min_w_0().truncate().child(text.clone()))
-                    .into_any_element()
-            },
+            pair::DisplayRow::FullWidth { text } => band_row(
+                SharedString::from(format!("diff-overlay-row-unified-{index}")),
+                text,
+                theme,
+            ),
             pair::DisplayRow::Context { old, new, text } => {
                 unified_line_row(index, old.or(*new), text, theme.foreground, None, theme)
             },
@@ -522,6 +577,101 @@ fn unified_line_row(
         .into_any_element()
 }
 
+/// 整行横带（selector 作为元素 id + debug key 传入）：hunk 头高亮，note
+/// （"\ No newline..."）按弱化说明处理；unified 的 FullWidth 与 split 的
+/// band 共用同一构造。带 hunk 上下文的头可达数百字符：单行截断不撑高。
+fn band_row(selector: SharedString, text: &str, theme: &gpui_component::Theme) -> gpui::AnyElement {
+    let hunk = text.starts_with("@@");
+    h_flex()
+        .id(selector.clone())
+        .debug_selector(move || selector.to_string())
+        .w_full()
+        .px_3()
+        .h(px(22.0))
+        .flex_shrink_0()
+        .items_center()
+        .when(hunk, |row| row.bg(theme.primary.opacity(0.08)))
+        .font_family(theme.mono_font_family.clone())
+        .text_size(theme.font_size - px(1.0))
+        .text_color(if hunk { theme.primary } else { theme.muted_foreground })
+        .child(div().flex_1().min_w_0().truncate().child(text.to_string()))
+        .into_any_element()
+}
+
+/// split 模式一行：band（hunk 头/注记）→ 整行横带（样式同 unified 的
+/// FullWidth）；否则左右两半夹 1px 分隔线。外层 `items_stretch`：行高由
+/// 较高一侧驱动，空占位与分隔线随之拉伸——两列恒对齐是 §5.2 单滚动
+/// 驱动的前提（pair 已保证两侧行数相等，这里补齐视觉高度）。
+fn split_row(
+    index: usize,
+    pair: &pair::SplitPair,
+    theme: &gpui_component::Theme,
+) -> gpui::AnyElement {
+    if let Some(text) = pair.band.as_deref() {
+        return band_row(
+            SharedString::from(format!("diff-overlay-row-split-{index}")),
+            text,
+            theme,
+        );
+    }
+    h_flex()
+        .id(SharedString::from(format!("diff-overlay-row-split-{index}")))
+        .debug_selector(move || format!("diff-overlay-row-split-{index}"))
+        .w_full()
+        .items_stretch()
+        .child(split_half(index, "left", pair.left.as_ref(), theme))
+        .child(div().w(px(1.0)).flex_shrink_0().bg(theme.border))
+        .child(split_half(index, "right", pair.right.as_ref(), theme))
+        .into_any_element()
+}
+
+/// split 单侧半行：行号槽（48px 右对齐弱化）+ 软换行文本；着色按单元格
+/// kind（Deleted 红 / Added 绿，底色同透明度；Context 前景色）。`None` 侧
+/// 渲染同构空占位（空文本、无底色）——高度零贡献，由外层 stretch 拉齐。
+fn split_half(
+    index: usize,
+    side: &'static str,
+    cell: Option<&pair::LineCell>,
+    theme: &gpui_component::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let (fg, bg) = match cell.map(|cell| cell.kind) {
+        Some(crate::native_result_model::diff::Kind::Deleted) => {
+            (theme.danger, Some(theme.danger.opacity(0.13)))
+        },
+        Some(crate::native_result_model::diff::Kind::Added) => {
+            (theme.success, Some(theme.success.opacity(0.13)))
+        },
+        _ => (theme.foreground, None),
+    };
+    h_flex()
+        .id(SharedString::from(format!("diff-overlay-row-split-{index}-{side}")))
+        .debug_selector(move || format!("diff-overlay-row-split-{index}-{side}"))
+        .flex_1()
+        .min_w_0()
+        .items_start()
+        .when_some(bg, |half, bg| half.bg(bg))
+        .child(
+            div()
+                .w(px(48.0))
+                .flex_shrink_0()
+                .text_right()
+                .font_family(theme.mono_font_family.clone())
+                .text_size(theme.font_size - px(1.0))
+                .text_color(theme.muted_foreground)
+                .child(cell.and_then(|cell| cell.no).map(|n| n.to_string()).unwrap_or_default()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .font_family(theme.mono_font_family.clone())
+                .text_size(theme.font_size - px(1.0))
+                .text_color(fg)
+                .line_height(gpui::relative(1.35))
+                .child(cell.map(|cell| cell.text.clone()).unwrap_or_default()),
+        )
+}
+
 /// 二进制/无改动等占位态：居中弱化说明。
 fn centered_note(color: gpui::Hsla, text: &str) -> gpui::AnyElement {
     div()
@@ -537,6 +687,15 @@ fn centered_note(color: gpui::Hsla, text: &str) -> gpui::AnyElement {
 /// 截断尾行（超限提示，行数/字节两种成因通用）；未截断返回 None。
 fn truncated_tail(language: crate::i18n::UiLanguage, truncated: bool) -> Option<String> {
     truncated.then(|| language.text(Message::VcsDiffTooLarge).to_string())
+}
+
+/// Loaded 态在指定模式下的列表计数（落地 reset 与模式切换共用同一选择，
+/// 保证两条路径的行数判定不会漂移）。
+fn loaded_item_count(loaded: &Loaded, mode: DiffMode) -> usize {
+    match mode {
+        DiffMode::Split => loaded.pairs.len(),
+        DiffMode::Unified => loaded.rows.len(),
+    }
 }
 
 /// 快照更新后目标文件是否仍在对应列表（`GitInfo` 在上游，判定放浮层侧）。

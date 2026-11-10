@@ -78,10 +78,23 @@ fn workspace_with_changes(
     body(owner.unwrap(), probe.unwrap(), root, cx);
 }
 
+/// 真实仓库 e2e 共用：跑真 git 子进程并断言退出码。
+fn run_git(root: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// 真实仓库 e2e 共用：最小 init + 提交身份配置。
+fn init_repo(root: &std::path::Path) {
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "t@t"]);
+    run_git(root, &["config", "user.name", "t"]);
+}
+
 /// 单击打开浮层。本地取数在确定性调度器上随事件派发同步落地（Task 7 起
 /// fetch::spawn 真发命令），loading 窗口不再可观测；非仓库根必然落到
 /// Error 态，据此断言「打开 + 取数必然离开放 loading」。成功落地的
-/// 端到端路径由 overlay_loads_unified_diff_from_real_repo 覆盖。
+/// 端到端路径由 overlay_renders_split_and_toggles_to_unified 覆盖。
 #[gpui::test]
 fn single_click_opens_overlay_and_local_fetch_resolves(cx: &mut TestAppContext) {
     workspace_with_changes(
@@ -241,32 +254,18 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
     );
 }
 
-/// 真实仓库端到端：点击文件行 → background_spawn 上跑真 git → Loaded
-/// 态的 unified 行渲染出来（loading 壳消失）。覆盖取数、generation 落地
-/// 与渲染三层，而不是只测状态机。
+/// 真实仓库端到端：点击文件行 → background_spawn 上跑真 git → Loaded。
+/// 默认 split：split 行渲染、unified 行不渲染；点头部「统一」钮后反转。
+/// 覆盖取数、generation 落地、默认模式与切换四层，而不是只测状态机。
 #[gpui::test]
-fn overlay_loads_unified_diff_from_real_repo(cx: &mut TestAppContext) {
+fn overlay_renders_split_and_toggles_to_unified(cx: &mut TestAppContext) {
     workspace_with_changes(
         cx,
         GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() },
         |owner, probe, root, cx| {
-            let git = |args: &[&str]| {
-                let out = std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(&root)
-                    .output()
-                    .unwrap();
-                assert!(
-                    out.status.success(),
-                    "git {args:?}: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            };
-            git(&["init", "-q"]);
-            git(&["config", "user.email", "t@t"]);
-            git(&["config", "user.name", "t"]);
+            init_repo(&root);
             std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
-            git(&["add", "a.txt"]);
+            run_git(&root, &["add", "a.txt"]);
             std::fs::write(root.join("a.txt"), "one\nTWO\n").unwrap();
 
             let redraw = |cx: &mut gpui::VisualTestContext| {
@@ -288,10 +287,120 @@ fn overlay_loads_unified_diff_from_real_repo(cx: &mut TestAppContext) {
             );
             redraw(cx);
             cx.debug_bounds("diff-overlay-body").expect("scrolled body mounted");
-            cx.debug_bounds("diff-overlay-row-unified-0").expect("first unified row rendered");
+            cx.debug_bounds("diff-overlay-row-split-0").expect("split is the default mode");
+            assert!(
+                cx.debug_bounds("diff-overlay-row-unified-0").is_none(),
+                "unified rows must not render while the mode is split"
+            );
             assert!(
                 cx.debug_bounds("diff-overlay-loading").is_none(),
                 "loading shell must be gone once loaded"
+            );
+            // 头部「统一」钮（真实 Button 点击路径）：行形必须反转。
+            let toggle = cx.debug_bounds("diff-mode-unified").expect("mode toggle rendered");
+            cx.simulate_mouse_down(toggle.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(toggle.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-row-unified-0").expect("unified rows after toggle");
+            assert!(
+                cx.debug_bounds("diff-overlay-row-split-0").is_none(),
+                "split rows must not render once toggled to unified"
+            );
+            // 回归：split→unified 必须重置列表计数（本夹具 pairs=3 < rows=4：
+            // hunk 带 + context 对 + 删/增对 vs 四条 unified 行），否则末行
+            // （+TWO，index 3）落在计数之外永远不渲染。滚到末尾验证可达。
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| ws.diff_overlay.overlay_scroll_to_end());
+            });
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-row-unified-3")
+                .expect("last unified row must be reachable after the toggle");
+        },
+    );
+}
+
+/// 模式是浮层持久偏好（设计 §5.1）：A 文件切到 unified 后关闭浮层，再点
+/// B 文件仍以 unified 打开；再切回 split 也生效。untracked 单行超宽文件
+/// 同时充当 split 单侧内容的等高验证：右列软换行成多行时，左列空占位
+/// 随较高一侧拉伸（§5.2 单滚动驱动的前提是两列恒等高）。
+#[gpui::test]
+fn overlay_mode_persists_across_files(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo {
+            unstaged: vec![('M', "a.txt".into()), ('?', "long.txt".into())],
+            ..GitInfo::default()
+        },
+        |owner, probe, root, cx| {
+            init_repo(&root);
+            std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+            run_git(&root, &["add", "a.txt"]);
+            std::fs::write(root.join("a.txt"), "one\nTWO\n").unwrap();
+            let long_line = "x".repeat(180);
+            std::fs::write(root.join("long.txt"), format!("{long_line}\n")).unwrap();
+
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+                let bounds = cx.debug_bounds(selector).expect("row rendered");
+                cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.run_until_parked();
+            };
+            let click_toggle = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+                let bounds = cx.debug_bounds(selector).expect("mode toggle rendered");
+                cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.run_until_parked();
+            };
+            // a.txt：默认 split 打开，切到 unified，然后关闭浮层。
+            redraw(cx);
+            click(cx, "git-tree-row-changes-0-a.txt");
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                "a.txt must reach the Loaded phase"
+            );
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-row-split-0").expect("a.txt opens in split by default");
+            click_toggle(cx, "diff-mode-unified");
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, cx| ws.close_diff_overlay(cx));
+            });
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "close_diff_overlay must close before the second file"
+            );
+            // long.txt：模式必须仍是 unified。
+            redraw(cx);
+            click(cx, "git-tree-row-changes-1-long.txt");
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                "long.txt must reach the Loaded phase"
+            );
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-row-unified-0")
+                .expect("mode persists across files: long.txt opens unified");
+            // 切回 split：untracked 单侧行渲染，且左右两半等高。
+            click_toggle(cx, "diff-mode-split");
+            redraw(cx);
+            let right =
+                cx.debug_bounds("diff-overlay-row-split-0-right").expect("right half rendered");
+            let left = cx
+                .debug_bounds("diff-overlay-row-split-0-left")
+                .expect("left placeholder rendered");
+            assert!(
+                right.size.height > px(22.0),
+                "180-char line must soft-wrap in the ~270px half, otherwise the \
+                 equal-height check below is vacuous"
+            );
+            assert_eq!(
+                left.size.height, right.size.height,
+                "one-sided row: the empty half must stretch to the wrapped sibling's height"
             );
         },
     );
