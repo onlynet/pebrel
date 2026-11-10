@@ -4,6 +4,7 @@
 //! 展开状态由调用方（`VcsList.collapsed_dirs`）持有：集合记录**已显式折叠**
 //! 的目录键，默认全展开；点击目录行翻转键后重建行。
 use super::list_model::{RowOps, VcsRow};
+use super::*;
 use crate::i18n::Message;
 use std::collections::HashSet;
 
@@ -116,5 +117,48 @@ fn append_dir(
             relative_path: relative_path.clone(),
             ops: section.ops,
         });
+    }
+}
+
+impl NebulaWorkspace {
+    /// 目录行：chevron + 目录名 + 子树文件计数，按层级缩进；单击折叠/
+    /// 展开（`toggle_dir` 翻转键并重建行模型）。高度与 Heading 行对齐。
+    pub(super) fn render_vcs_dir_row(
+        &mut self,
+        section_id: &'static str,
+        path: &str,
+        name: &str,
+        depth: usize,
+        count: usize,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let hover = theme.list_hover;
+        let path = path.to_string();
+        h_flex()
+            .id(SharedString::from(format!("git-tree-dir-{section_id}-{path}")))
+            .debug_selector(|| format!("git-tree-dir-{section_id}-{path}"))
+            .h(px(26.0))
+            .w_full()
+            .px_2()
+            .pl(px(8.0) + px(14.0) * depth as f32)
+            .gap_1()
+            .items_center()
+            .rounded_md()
+            .hover(|row| row.bg(hover))
+            .child(div().w(px(12.0)).text_xs().text_color(muted).child(if expanded {
+                "▾"
+            } else {
+                "▸"
+            }))
+            .child(div().text_sm().min_w_0().truncate().child(name.to_string()))
+            .child(div().text_xs().text_color(muted).child(count.to_string()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.vcs_list.toggle_dir(section_id, &path);
+                cx.notify();
+            }))
+            .into_any_element()
     }
 }

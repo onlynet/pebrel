@@ -216,3 +216,161 @@ fn untracked_directory_entry_yields_dir_row_with_nested_change() {
         VcsRow::Change { relative_path, .. } if relative_path == "build/")));
     assert!(!rows.iter().any(|r| matches!(r, VcsRow::Dir { path, .. } if path.is_empty())));
 }
+
+/// 折叠走「翻转键 + 强制 sync 重建」路径：必须收起子行且再点一次完整还原
+/// （回归：`toggle_dir` 清空 `snapshot` 强制重建，快照指针不能因此丢失）。
+#[test]
+fn toggle_dir_rebuilds_rows_and_restores_on_second_toggle() {
+    use crate::display::side_panel::{GitInfo, GitPanelView};
+    let info = GitInfo {
+        unstaged: vec![('M', "src/a.rs".into()), ('M', "src/b.rs".into()), ('M', "top.rs".into())],
+        ..GitInfo::default()
+    };
+    let mut list = VcsList::default();
+    list.sync(Some(Arc::new(info)), GitPanelView::Changes, Some(PathBuf::from("/repo")), false);
+    let change_count =
+        |l: &VcsList| l.rows_vcs().iter().filter(|r| matches!(r, VcsRow::Change { .. })).count();
+    assert_eq!(change_count(&list), 3);
+    list.toggle_dir("changes", "src");
+    assert_eq!(change_count(&list), 1, "collapsed dir hides its two children");
+    assert!(list.rows_vcs().iter().any(|r| matches!(r,
+        VcsRow::Dir { path, expanded, .. } if path == "src" && !*expanded)));
+    list.toggle_dir("changes", "src");
+    assert_eq!(change_count(&list), 3, "re-expansion restores rows");
+}
+
+/// 单击目录行折叠、再单击展开：点击走真实命中区域（debug_bounds 定位目录
+/// 行元素后模拟鼠标），折叠翻转后行模型同步重建、子文件行随之隐藏/恢复。
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod interaction {
+    use super::*;
+    use crate::display::side_panel::{GitInfo, GitPanelView};
+    use gpui::{Modifiers, TestAppContext};
+
+    struct DirListProbe(Entity<NebulaWorkspace>);
+    impl Render for DirListProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(320.0))
+                .h(px(300.0))
+                .flex()
+                .child(self.0.update(cx, |workspace, cx| workspace.render_vcs_list(cx)))
+        }
+    }
+
+    #[gpui::test]
+    fn dir_row_click_toggles_collapse(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::gpui_shell::math_view::register(cx);
+            crate::gpui_shell::file_editor::init(cx);
+            crate::gpui_shell::init(cx, None);
+            cx.set_reduce_motion(true);
+            windowing::initialize(cx, crate::runtime_api::RuntimeHub::new());
+        });
+        let data = Arc::new(GitInfo {
+            unstaged: vec![
+                ('M', "src/a.rs".into()),
+                ('M', "src/b.rs".into()),
+                ('M', "top.rs".into()),
+            ],
+            ..GitInfo::default()
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let mut owner = None;
+        let mut probe = None;
+        let (_, mut cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| {
+                NebulaWorkspace::new(
+                    window,
+                    None,
+                    None,
+                    1,
+                    crate::runtime_api::RuntimeHub::new(),
+                    windowing::WorkspaceStartup::Empty,
+                    windowing::WindowRole::Regular,
+                    cx,
+                )
+            });
+            workspace.update(cx, |workspace, _| {
+                workspace.vcs_list.sync(
+                    Some(data.clone()),
+                    GitPanelView::Changes,
+                    Some(root.clone()),
+                    false,
+                );
+            });
+            let view = cx.new(|_| DirListProbe(workspace.clone()));
+            owner = Some(workspace);
+            probe = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let owner = owner.unwrap();
+        let probe = probe.unwrap();
+        cx.run_until_parked();
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                probe.update(cx, |_, cx| cx.notify());
+                let _ = window.draw(cx);
+            });
+        };
+        let click_dir_row = |cx: &mut gpui::VisualTestContext| {
+            let bounds = cx.debug_bounds("git-tree-dir-changes-src").expect("dir row rendered");
+            cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+        };
+        redraw(&mut cx);
+        // 文件行按父目录深度缩进：嵌套条目（index 0 = src/a.rs）的名字元素
+        // 必须严格右于根级条目（index 2 = top.rs）；只比左缘，不锚定像素值。
+        let nested = cx.debug_bounds("vcs-file-name-changes-0").expect("nested name element");
+        let root = cx.debug_bounds("vcs-file-name-changes-2").expect("root name element");
+        assert!(
+            nested.left() > root.left(),
+            "file rows must indent by depth: nested {nested:?} vs root {root:?}"
+        );
+        click_dir_row(&mut cx);
+        assert!(
+            owner.read_with(cx, |ws, _| ws.vcs_list.collapsed_dirs.clone()).contains("changes:src"),
+            "first click collapses src"
+        );
+        redraw(&mut cx);
+        assert!(
+            cx.debug_bounds("git-tree-row-changes-0-src/a.rs").is_none(),
+            "collapsed dir no longer renders its file rows"
+        );
+        click_dir_row(&mut cx);
+        assert!(
+            !owner
+                .read_with(cx, |ws, _| ws.vcs_list.collapsed_dirs.clone())
+                .contains("changes:src"),
+            "second click re-expands src"
+        );
+        redraw(&mut cx);
+        assert!(
+            cx.debug_bounds("git-tree-row-changes-0-src/a.rs").is_some(),
+            "re-expansion restores the file rows"
+        );
+    }
+}
+
+/// 折叠键的粘性：新快照（Arc 指针不同，走完整重建路径）不得清掉已折叠目录。
+#[test]
+fn collapsed_dirs_survives_snapshot_refresh() {
+    use crate::display::side_panel::{GitInfo, GitPanelView};
+    let mut list = VcsList::default();
+    list.sync(
+        Some(Arc::new(GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..Default::default() })),
+        GitPanelView::Changes,
+        Some(PathBuf::from("/repo")),
+        false,
+    );
+    list.toggle_dir("changes", "src");
+    list.sync(
+        Some(Arc::new(GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..Default::default() })),
+        GitPanelView::Changes,
+        Some(PathBuf::from("/repo")),
+        false,
+    );
+    assert!(list.collapsed_dirs.contains("changes:src"));
+}

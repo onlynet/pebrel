@@ -198,6 +198,9 @@ impl NebulaWorkspace {
                 let svn_add = ops == RowOps::Svn && *status == '?';
                 let svn_resolve = ops == RowOps::Svn && *status == 'C';
                 let svn_diff = ops == RowOps::Svn && !matches!(*status, '?' | '!');
+                // 树视图的文件行按父目录深度缩进（与目录行同一缩进标尺）；
+                // SVN 保持平铺（无树）。
+                let file_depth = relative_path.matches('/').count();
                 h_flex()
                     .id(SharedString::from(format!(
                         "git-tree-row-{section_id}-{index}-{relative_path}"
@@ -207,6 +210,7 @@ impl NebulaWorkspace {
                     .h(px(30.0))
                     .w_full()
                     .px_2()
+                    .when(is_git, |row| row.pl(px(8.0) + px(14.0) * file_depth as f32))
                     .gap_2()
                     .items_center()
                     .rounded_md()
@@ -453,16 +457,9 @@ impl NebulaWorkspace {
                     }))
                     .into_any_element()
             },
-            // 目录行的最小占位渲染：树行模型（tree_rows）先落地，展开点击
-            // 与层级缩进由后续渲染任务接手。
-            VcsRow::Dir { name, count, .. } => h_flex()
-                .h(px(26.0))
-                .px_2()
-                .items_center()
-                .text_xs()
-                .text_color(muted)
-                .child(name)
-                .child(div().ml_2().child(count.to_string()))
+            // 目录行渲染与折叠点击在 tree_rows（fork 侧）实现，这里只委派。
+            VcsRow::Dir { section_id, path, name, depth, count, expanded } => self
+                .render_vcs_dir_row(section_id, &path, &name, depth, count, expanded, cx)
                 .into_any_element(),
         };
         // 历史行必须首尾相接；通用的 4px 行底留白会把线路切成一段段。

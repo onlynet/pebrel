@@ -52,7 +52,8 @@ pub(in crate::gpui_shell::workspace) struct VcsList {
     /// 远端文档、本地专属入口（merge 编辑器、SVN 菜单）不画。行模型不变。
     pub(super) remote: bool,
     /// Git 视图目录树的显式折叠集合（键 = `tree_rows::dir_key`）；默认
-    /// 全展开，SVN/History 行不经它。
+    /// 全展开，SVN/History 行不经它。折叠状态跨快照与目录切换保留
+    /// （键按相对路径，同名目录视为同一折叠意图）。
     pub(super) collapsed_dirs: std::collections::HashSet<String>,
     rows: Vec<VcsRow>,
     lane_layout: (f32, f32),
@@ -118,13 +119,12 @@ impl VcsList {
                     info.conflicts.iter().map(|(_, p)| p.as_str()).collect();
                 let is_git = info.vcs == VcsKind::Git;
                 if is_git {
-                    let conflict_entries: Vec<(char, String)> = info.conflicts.clone();
                     super::tree_rows::append_tree_section(
                         &mut self.rows,
                         &self.collapsed_dirs,
                         "conflicts",
                         Message::VcsMergeConflicts,
-                        &conflict_entries,
+                        &info.conflicts,
                         RowOps::Conflict,
                     );
                     if view == GitPanelView::Changes {
