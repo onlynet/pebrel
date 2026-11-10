@@ -2,7 +2,8 @@
 //!
 //! 生命周期独立于 tab——打开不建任务条目、关闭不动终端；数据按点击惰性获取，
 //! generation 递增作废晚到响应（与 remote_git 同一合同）。行渲染按 mode 分派
-//! （unified/split，默认 split 左右对比）；关闭路径（Task 9）随后续任务填充。
+//! （unified/split，默认 split 左右对比）；关闭走 ✕ / Esc / tab 指纹变化三条
+//! 路径，打开接管键盘焦点、关闭归还活动 tab（§5.3）。
 use super::*;
 use crate::display::side_panel::GitInfo;
 use crate::i18n::Message;
@@ -25,6 +26,8 @@ pub(crate) struct DiffOverlayState {
     seen_snapshot: Option<Arc<GitInfo>>,
     /// 打开时的 (active tab, settings_open)；变化即自动关闭。
     tab_fingerprint: (usize, bool),
+    /// 浮层根的键盘焦点句柄：打开即接管（Esc 可达），关闭归还。
+    focus: Option<gpui::FocusHandle>,
     scroll: gpui::ListState,
 }
 
@@ -74,6 +77,7 @@ impl Default for DiffOverlayState {
             phase: Phase::Loading,
             seen_snapshot: None,
             tab_fingerprint: (0, false),
+            focus: None,
             scroll: gpui::ListState::new(0, gpui::ListAlignment::Top, px(22.0)),
         }
     }
@@ -113,11 +117,19 @@ impl DiffOverlayState {
     fn overlay_scroll_to_end(&mut self) {
         self.scroll.scroll_to_end();
     }
+
+    /// 测试探针：键盘焦点是否落在浮层内（根句柄或其内部控件持有皆算）。
+    #[cfg(test)]
+    fn overlay_focused(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
+        self.focus.as_ref().is_some_and(|handle| handle.contains_focused(window, cx))
+    }
 }
 
 impl NebulaWorkspace {
     /// 文件行单击入口（site/semantics/remote 由 rows.rs 解析后传入）：
-    /// 同目标在开即无操作；否则进入 Loading 并发起获取。
+    /// 同目标在开即无操作；否则进入 Loading、接管键盘焦点并发起获取。
+    /// 焦点只在打开时给一次：每次 render 都 focus 会从模式切换钮上抢回
+    /// 焦点，浮层内部控件的键盘路径就断了。
     pub(super) fn open_diff_overlay(
         &mut self,
         site: fetch::Site,
@@ -125,6 +137,7 @@ impl NebulaWorkspace {
         semantics: fetch::Semantics,
         status: char,
         remote: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // 同目标判等必须连来源一起比：路径 + 语义相同但 site/remote 不同
@@ -143,13 +156,25 @@ impl NebulaWorkspace {
         self.diff_overlay.seen_snapshot = self.current_vcs_snapshot();
         self.diff_overlay.tab_fingerprint = (self.active, self.settings_open);
         self.diff_overlay.scroll = gpui::ListState::new(0, gpui::ListAlignment::Top, px(22.0));
+        let handle = self.diff_overlay.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        window.focus(&handle, cx);
         fetch::spawn(self.diff_overlay.generation, &target, cx);
         cx.notify();
     }
 
-    pub(super) fn close_diff_overlay(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_diff_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.diff_overlay.target.take().is_some() {
             self.diff_overlay.phase = Phase::Loading;
+            // 焦点回活动 tab（设计 §5.3）。focus_active 对无可回落视图的
+            // Empty 工作区是 no-op，此时 blur 掉浮层句柄：键盘焦点不能
+            // 挂在即将卸载的元素上（否则 Esc/Tab 会派发到幽灵节点）。
+            // 有 tab 时 focus_active 的 defer 焦点后于本 blur 生效，不受影响。
+            self.focus_active(window, cx);
+            if let Some(handle) = self.diff_overlay.focus.as_ref() {
+                if handle.contains_focused(window, cx) {
+                    window.blur();
+                }
+            }
             cx.notify();
         }
     }
@@ -232,7 +257,7 @@ impl NebulaWorkspace {
     /// 不在则关。只做状态判定与调度，不同步等待任何 IO。
     pub(super) fn render_diff_overlay(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if self.diff_overlay.target.is_none() {
@@ -240,7 +265,7 @@ impl NebulaWorkspace {
         }
         let fingerprint = (self.active, self.settings_open);
         if fingerprint != self.diff_overlay.tab_fingerprint {
-            self.close_diff_overlay(cx);
+            self.close_diff_overlay(window, cx);
             return None;
         }
         let snapshot = self.current_vcs_snapshot();
@@ -254,7 +279,7 @@ impl NebulaWorkspace {
             if changed {
                 let target = self.diff_overlay.target.clone().unwrap();
                 if !target_still_listed(current, &target.path, target.semantics) {
-                    self.close_diff_overlay(cx);
+                    self.close_diff_overlay(window, cx);
                     return None;
                 }
                 self.diff_overlay.seen_snapshot = snapshot.clone();
@@ -265,7 +290,7 @@ impl NebulaWorkspace {
         } else if self.diff_overlay.seen_snapshot.is_some() {
             // 列表来源整体消失（仓库退出/刷新失败）：按「文件已不在列表」的
             // 保守延伸直接关闭，不留指向已消失快照的浮层。
-            self.close_diff_overlay(cx);
+            self.close_diff_overlay(window, cx);
             return None;
         }
         Some(self.render_overlay_body(cx))
@@ -296,9 +321,19 @@ impl NebulaWorkspace {
             'C' | 'U' => theme.danger,
             _ => theme.warning,
         });
+        let handle = self.diff_overlay.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         div()
             .id("diff-overlay")
             .debug_selector(|| "diff-overlay".to_string())
+            // 键盘焦点锚在浮层根（open_diff_overlay 打开时接管）：Esc 处理
+            // 器挂根上，焦点落在内部控件时也沿元素树冒泡到达。
+            .track_focus(&handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_diff_overlay(window, cx);
+                }
+            }))
             .absolute()
             .inset_0()
             // 与中心卡内容底色同一 token（render.rs 同款取法）：视觉上即
@@ -376,12 +411,18 @@ impl NebulaWorkspace {
                             ),
                         div().rounded(theme.radius).bg(theme.tokens.secondary_active),
                     ))
-                    // 关闭按钮（Task 9 接管交互）。
+                    // 关闭按钮（§5.3 关闭路径之一；Esc/切 tab 见根节点与
+                    // render_diff_overlay 的指纹判定）。
                     .child(
-                        div()
-                            .id("diff-close")
-                            .text_color(theme.muted_foreground)
-                            .child("✕"),
+                        Button::new("diff-close")
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .debug_selector(|| "diff-close".to_string())
+                            .tooltip(language.text(Message::VcsDiffClose))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_diff_overlay(window, cx);
+                            })),
                     ),
             )
             .child(match &self.diff_overlay.phase {

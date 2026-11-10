@@ -164,7 +164,7 @@ fn svn_click_keeps_selection_without_overlay(cx: &mut TestAppContext) {
 fn same_path_different_site_is_not_a_noop(cx: &mut TestAppContext) {
     workspace_with_changes(cx, GitInfo::default(), |owner, _probe, _root, cx| {
         let open_local = |cx: &mut gpui::VisualTestContext, root: &str| {
-            cx.update(|_, cx| {
+            cx.update(|window, cx| {
                 owner.update(cx, |ws, cx| {
                     ws.open_diff_overlay(
                         fetch::Site::Local { root: PathBuf::from(root) },
@@ -172,6 +172,7 @@ fn same_path_different_site_is_not_a_noop(cx: &mut TestAppContext) {
                         fetch::Semantics::Unstaged,
                         'M',
                         false,
+                        window,
                         cx,
                     );
                 });
@@ -187,7 +188,7 @@ fn same_path_different_site_is_not_a_noop(cx: &mut TestAppContext) {
             "identical target is a no-op"
         );
         // 同路径换来源 + remote 标记：必须重开并指向新 site。
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             owner.update(cx, |ws, cx| {
                 ws.open_diff_overlay(
                     fetch::Site::Local { root: PathBuf::from("/b") },
@@ -195,6 +196,7 @@ fn same_path_different_site_is_not_a_noop(cx: &mut TestAppContext) {
                     fetch::Semantics::Unstaged,
                     'M',
                     true,
+                    window,
                     cx,
                 );
             });
@@ -219,7 +221,7 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
         cx,
         GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..GitInfo::default() },
         |owner, probe, _root, cx| {
-            cx.update(|_, cx| {
+            cx.update(|window, cx| {
                 owner.update(cx, |ws, cx| {
                     ws.open_diff_overlay(
                         fetch::Site::Local { root: PathBuf::from("/repo") },
@@ -227,6 +229,7 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
                         fetch::Semantics::Unstaged,
                         'M',
                         false,
+                        window,
                         cx,
                     );
                 });
@@ -250,6 +253,121 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
                 !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
                 "snapshot source vanished; overlay must close"
             );
+        },
+    );
+}
+
+/// 三条关闭路径逐一验证（设计 §5.3 决策表）：✕ 按钮、Esc、tab 指纹变化。
+/// 每条路径独立从「已打开 + 已挂载」出发，避免前一条的关闭副作用喂给下一条。
+#[gpui::test]
+fn overlay_closes_via_button_escape_and_context_change(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..GitInfo::default() },
+        |owner, probe, _root, cx| {
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            let open = |cx: &mut gpui::VisualTestContext| {
+                let bounds =
+                    cx.debug_bounds("git-tree-row-changes-0-src/a.rs").expect("file row rendered");
+                cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.run_until_parked();
+                redraw(cx);
+                cx.debug_bounds("diff-overlay").expect("overlay mounted");
+            };
+            // (a) ✕ 按钮：占位符换成真 Button 后，点击必须关闭并卸载浮层。
+            redraw(cx);
+            open(cx);
+            let close = cx.debug_bounds("diff-close").expect("close button rendered");
+            cx.simulate_mouse_down(close.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(close.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "the close button must close the overlay"
+            );
+            redraw(cx);
+            assert!(
+                cx.debug_bounds("diff-overlay").is_none(),
+                "overlay must unmount after the close button"
+            );
+            // (b) Esc：浮层持有焦点时按下 Escape 必须关闭（含 stop_propagation
+            // 不外漏——若外漏到全局处理器也不会改变 is_open 断言的判定对象）。
+            open(cx);
+            cx.update(|window, cx| {
+                assert!(
+                    owner.read(cx).diff_overlay.overlay_focused(window, cx),
+                    "an open overlay must hold keyboard focus"
+                );
+            });
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke { key: "escape".into(), ..Default::default() },
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.run_until_parked();
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "escape must close the overlay"
+            );
+            // (c) tab 指纹：settings_open 翻转（等价于点任务栏切走的机制），
+            // 下一次 render 必须自动关闭（Task 5 行为的回归钉）。
+            open(cx);
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| ws.settings_open = true);
+            });
+            redraw(cx);
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "a tab fingerprint change must close the overlay"
+            );
+        },
+    );
+}
+
+/// 焦点合同（设计 §5.3）：打开即接管键盘焦点（Esc 可达），关闭即归还——
+/// Empty 工作区没有可回落的视图，只断言浮层不再持有焦点。
+#[gpui::test]
+fn overlay_takes_and_releases_focus(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..GitInfo::default() },
+        |owner, probe, _root, cx| {
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            redraw(cx);
+            let bounds =
+                cx.debug_bounds("git-tree-row-changes-0-src/a.rs").expect("file row rendered");
+            cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            redraw(cx);
+            cx.update(|window, cx| {
+                assert!(
+                    owner.read(cx).diff_overlay.overlay_focused(window, cx),
+                    "opening the overlay must move keyboard focus into it"
+                );
+            });
+            let close = cx.debug_bounds("diff-close").expect("close button rendered");
+            cx.simulate_mouse_down(close.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(close.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            redraw(cx);
+            cx.update(|window, cx| {
+                assert!(
+                    !owner.read(cx).diff_overlay.overlay_focused(window, cx),
+                    "closing the overlay must release its focus"
+                );
+            });
         },
     );
 }
@@ -368,8 +486,8 @@ fn overlay_mode_persists_across_files(cx: &mut TestAppContext) {
             redraw(cx);
             cx.debug_bounds("diff-overlay-row-split-0").expect("a.txt opens in split by default");
             click_toggle(cx, "diff-mode-unified");
-            cx.update(|_, cx| {
-                owner.update(cx, |ws, cx| ws.close_diff_overlay(cx));
+            cx.update(|window, cx| {
+                owner.update(cx, |ws, cx| ws.close_diff_overlay(window, cx));
             });
             assert!(
                 !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),

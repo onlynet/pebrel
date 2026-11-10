@@ -440,7 +440,7 @@ impl NebulaWorkspace {
                             )),
                         )
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.side_panel.selected = Some(path.clone());
                         // 单击 = 弹 diff 浮层（选中保留；双击编辑路径不变）。
                         // site/semantics 在此解析：remote/root/ops 只在本模块可见；
@@ -470,6 +470,7 @@ impl NebulaWorkspace {
                                     semantics,
                                     click_status,
                                     remote,
+                                    window,
                                     cx,
                                 );
                             }
