@@ -147,6 +147,6 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 
 ## 11. 行数预算与风险
 
-- 单文件控制在 800 行提示线内（超出拆子模块），`scripts/check_architecture.py --base <PR-base>` 验证。
+- 单文件控制在 800 行提示线内（超出拆子模块），`scripts/check_architecture.py --base <PR-base>` 验证。已接受的例外：`vcs_panel/diff_overlay.rs` 814 行（迁入 vcs_panel 后路径变长引发的 fmt 拆行所致，非逻辑膨胀）与 `diff_overlay/tests.rs`——均为 guidance 级提示、不阻断门禁；渲染拆分（`diff_overlay/view.rs`）留待该文件下次实质功能改动时顺带处理。
 - 主要合并风险集中在上游同期重构 `vcs_panel/list_model.rs` 或中心卡结构；两者均为单点小插入，冲突易手工解决。
 - `native_result_model/diff.rs` 解析器若配对信息不足（如缺逐行行号对），`pair.rs` 从 hunk 头行号推导，不修改解析器。
