@@ -55,12 +55,14 @@ impl DirNode {
 }
 
 /// 把一个 section 的平铺条目构建成「标题 + 目录行 + 文件行」序列，追加到
-/// `rows`。`Change.index` 严格等于条目在原列表中的序号（debug selector 与
+/// `rows`。标题文案由调用方传入（本模块不做 section_id→文案映射）。
+/// `Change.index` 严格等于条目在原列表中的序号（debug selector 与
 /// 行内操作按它寻址，不得重排）。
 pub(super) fn append_tree_section(
     rows: &mut Vec<VcsRow>,
     collapsed: &HashSet<String>,
     section_id: &'static str,
+    message: Message,
     entries: &[(char, String)],
     ops: RowOps,
 ) {
@@ -72,14 +74,7 @@ pub(super) fn append_tree_section(
         let parts: Vec<&str> = path.split('/').collect();
         root.insert(&parts, index);
     }
-    rows.push(VcsRow::Heading {
-        message: Some(match section_id {
-            "staged" => Message::VcsStaged,
-            "conflicts" => Message::VcsMergeConflicts,
-            _ => Message::VcsChanges,
-        }),
-        count: entries.len(),
-    });
+    rows.push(VcsRow::Heading { message: Some(message), count: entries.len() });
     let section = SectionCtx { id: section_id, entries, ops, collapsed };
     append_dir(rows, &section, &root, "", 0);
 }

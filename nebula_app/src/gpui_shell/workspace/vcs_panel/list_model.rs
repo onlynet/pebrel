@@ -51,6 +51,9 @@ pub(in crate::gpui_shell::workspace) struct VcsList {
     /// 快照来自远端 pane（SSH Git 视图）：行内写操作改走远端 exec、双击开
     /// 远端文档、本地专属入口（merge 编辑器、SVN 菜单）不画。行模型不变。
     pub(super) remote: bool,
+    /// Git 视图目录树的显式折叠集合（键 = `tree_rows::dir_key`）；默认
+    /// 全展开，SVN/History 行不经它。
+    pub(super) collapsed_dirs: std::collections::HashSet<String>,
     rows: Vec<VcsRow>,
     lane_layout: (f32, f32),
     pub(super) scroll: gpui::ListState,
@@ -65,6 +68,7 @@ impl Default for VcsList {
             view: None,
             root: None,
             remote: false,
+            collapsed_dirs: std::collections::HashSet::new(),
             rows: Vec::new(),
             lane_layout: (0.0, 0.0),
             scroll: gpui::ListState::new(0, gpui::ListAlignment::Top, px(34.0)),
@@ -112,52 +116,82 @@ impl VcsList {
             } else {
                 let conflicts: std::collections::HashSet<_> =
                     info.conflicts.iter().map(|(_, p)| p.as_str()).collect();
-                let mut section =
-                    |id, message, entries: &[(char, String)], ops, exclude_conflicts: bool| {
-                        let changes: Vec<_> = entries
-                            .iter()
-                            .filter(|(_, p)| !exclude_conflicts || !conflicts.contains(p.as_str()))
-                            .enumerate()
-                            .map(|(index, (status, path))| VcsRow::Change {
-                                section_id: id,
-                                index,
-                                status: *status,
-                                relative_path: path.clone(),
-                                ops,
-                            })
-                            .collect();
-                        if !changes.is_empty() {
-                            self.rows.push(VcsRow::Heading { message, count: changes.len() });
-                            self.rows.extend(changes);
-                        }
-                    };
                 let is_git = info.vcs == VcsKind::Git;
-                section(
-                    "conflicts",
-                    Some(Message::VcsMergeConflicts),
-                    &info.conflicts,
-                    if is_git { RowOps::Conflict } else { RowOps::Svn },
-                    false,
-                );
-                match info.vcs {
-                    VcsKind::Git if view == GitPanelView::Changes => {
-                        section(
+                if is_git {
+                    let conflict_entries: Vec<(char, String)> = info.conflicts.clone();
+                    super::tree_rows::append_tree_section(
+                        &mut self.rows,
+                        &self.collapsed_dirs,
+                        "conflicts",
+                        Message::VcsMergeConflicts,
+                        &conflict_entries,
+                        RowOps::Conflict,
+                    );
+                    if view == GitPanelView::Changes {
+                        // 冲突路径同时存在于多个列表；只允许在冲突段渲染
+                        //（沿用旧 section 闭包 exclude_conflicts 语义）。
+                        let staged: Vec<(char, String)> = info
+                            .staged
+                            .iter()
+                            .filter(|(_, p)| !conflicts.contains(p.as_str()))
+                            .cloned()
+                            .collect();
+                        let unstaged: Vec<(char, String)> = info
+                            .unstaged
+                            .iter()
+                            .filter(|(_, p)| !conflicts.contains(p.as_str()))
+                            .cloned()
+                            .collect();
+                        super::tree_rows::append_tree_section(
+                            &mut self.rows,
+                            &self.collapsed_dirs,
                             "staged",
-                            Some(Message::VcsStaged),
-                            &info.staged,
+                            Message::VcsStaged,
+                            &staged,
                             RowOps::Staged,
-                            true,
                         );
-                        section(
+                        super::tree_rows::append_tree_section(
+                            &mut self.rows,
+                            &self.collapsed_dirs,
                             "changes",
-                            Some(Message::VcsChanges),
-                            &info.unstaged,
+                            Message::VcsChanges,
+                            &unstaged,
                             RowOps::Unstaged,
-                            true,
                         );
-                    },
-                    VcsKind::Svn => section("svn", None, &info.unstaged, RowOps::Svn, true),
-                    _ => {},
+                    }
+                } else {
+                    let mut section =
+                        |id, message, entries: &[(char, String)], ops, exclude_conflicts: bool| {
+                            let changes: Vec<_> = entries
+                                .iter()
+                                .filter(|(_, p)| {
+                                    !exclude_conflicts || !conflicts.contains(p.as_str())
+                                })
+                                .enumerate()
+                                .map(|(index, (status, path))| VcsRow::Change {
+                                    section_id: id,
+                                    index,
+                                    status: *status,
+                                    relative_path: path.clone(),
+                                    ops,
+                                })
+                                .collect();
+                            if !changes.is_empty() {
+                                self.rows.push(VcsRow::Heading { message, count: changes.len() });
+                                self.rows.extend(changes);
+                            }
+                        };
+                    section(
+                        "conflicts",
+                        Some(Message::VcsMergeConflicts),
+                        &info.conflicts,
+                        RowOps::Svn,
+                        false,
+                    );
+                    match info.vcs {
+                        VcsKind::Svn => section("svn", None, &info.unstaged, RowOps::Svn, true),
+                        _ => {},
+                    }
                 }
                 if self.rows.is_empty() && info.vcs != VcsKind::SvnRepository {
                     self.rows.push(VcsRow::Empty(if is_git && view == GitPanelView::Conflicts {
@@ -177,8 +211,26 @@ impl VcsList {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn rows_vcs(&self) -> &[VcsRow] {
+        &self.rows
+    }
     pub(super) fn row(&self, index: usize) -> Option<&VcsRow> {
         self.rows.get(index)
+    }
+    /// 目录行点击：翻转折叠键并重建行（快照与位置不变，仅重排当前视图）。
+    pub(super) fn toggle_dir(&mut self, section_id: &str, dir_path: &str) {
+        let key = super::tree_rows::dir_key(section_id, dir_path);
+        if !self.collapsed_dirs.remove(&key) {
+            self.collapsed_dirs.insert(key);
+        }
+        let snapshot = self.snapshot.clone();
+        let view = self.view.unwrap_or(GitPanelView::Changes);
+        let root = self.root.clone();
+        let remote = self.remote;
+        self.rows.clear();
+        self.snapshot = None; // 强制 sync 重建
+        self.sync(snapshot, view, root, remote);
     }
     pub(super) fn root(&self) -> Option<&PathBuf> {
         self.root.as_ref()
