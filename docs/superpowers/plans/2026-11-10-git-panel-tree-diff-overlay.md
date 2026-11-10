@@ -30,7 +30,7 @@
 | `nebula_app/src/gpui_shell/workspace.rs` | `mod diff_overlay;`（`mod documents;` 后）+ 结构体字段 1 行（`vcs_list: vcs_panel::VcsList,` 后）+ `new()` 初始化 1 行（`vcs_list: vcs_panel::VcsList::default(),` 后） |
 | `nebula_app/src/gpui_shell/workspace/render.rs` | 中心卡 `.children(content),` 后追加 `.when_some(self.render_diff_overlay(...))` |
 | `nebula_app/src/gpui_shell/workspace/vcs_panel.rs` | `mod rows;` 后加 `mod tree_rows;`；`mod list_tests;` 后加 `mod tree_rows_tests;`（同一 cfg(test) 区域） |
-| `nebula_app/src/gpui_shell/workspace/vcs_panel/list_model.rs` | `VcsRow` 枚举末尾加 `Dir` 变体；`VcsList` 加 `expanded` 字段 + Default 初始化；`sync()` 内 Git 两个分支改调 `tree_rows::append_tree_section` |
+| `nebula_app/src/gpui_shell/workspace/vcs_panel/list_model.rs` | `VcsRow` 枚举末尾加 `Dir` 变体；`VcsList` 加 `collapsed_dirs` 字段 + Default 初始化（执行期更名，见偏差补记）；`sync()` 内 Git 两个分支改调 `tree_rows::append_tree_section`；T12 起另托管 `diff_overlay` 字段 |
 | `nebula_app/src/gpui_shell/workspace/vcs_panel/rows.rs` | `render_vcs_row` match 加 `Dir` 分支（委托 tree_rows）；`Change` 行 `on_click` 追加弹层调用 |
 | `nebula_app/i18n/en-US.json` + `zh-CN.json` | `vcs` 子树各加一个 `diff` 块（12 个键） |
 
@@ -693,7 +693,7 @@ git commit -m "feat(workspace): clickable collapsible directory rows in the git 
 **Files:**
 - Create: `nebula_app/src/gpui_shell/workspace/diff_overlay.rs`
 - Create: `nebula_app/src/gpui_shell/workspace/diff_overlay/tests.rs`
-- Modify: `nebula_app/src/gpui_shell/workspace.rs`（3 行：mod + 字段 + 初始化）
+- Modify: `nebula_app/src/gpui_shell/workspace.rs`（3 行：mod + 字段 + 初始化；T12 棘轮解阻后净零，见偏差补记）
 - Modify: `nebula_app/src/gpui_shell/workspace/render.rs`（1 处）
 - Modify: `nebula_app/src/gpui_shell/workspace/vcs_panel/rows.rs`（on_click 追加调用）
 

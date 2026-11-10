@@ -98,7 +98,7 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 
 - **头部**：状态字母徽标（沿用现有颜色映射）+ 相对路径 + 语义标签 + `SegmentedRow` 布局切换（对比/统一）+ ✕ 关闭按钮。
 - **内容区**：`gpui::list` 虚拟列表，固定行高（等宽字体）。Split 模式左右两列（各自独立行号槽，删除/新增行背景着色，上下文行两列同现）；Unified 模式单列 `+/-` 行。左右行数由 `pair.rs` 配对保证一致，单滚动驱动，无独立滚动条同步问题。
-- **键盘/焦点**：打开时焦点进浮层 `FocusHandle`；Esc 关闭；↑↓ / PgUp / PgDn / Home / End 滚动；内容支持文本选择复制；关闭后焦点归还终端 pane。
+- **键盘/焦点**：打开时焦点进浮层 `FocusHandle`；Esc 关闭；↑↓ / PgUp / PgDn / Home / End 滚动；关闭后焦点归还终端 pane。（文本选择复制未随首版实现，见 §10 非目标。）
 
 ### 5.3 关闭路径实现
 
@@ -108,8 +108,8 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 
 ## 6. 数据获取与刷新（`fetch.rs`）
 
-- **本地**：后台线程跑 `git diff --no-color [--cached | HEAD] -- <path>`（`hidden_git_command`）；已跟踪二进制文件由 git diff 输出的 `Binary files … differ` 行识别，显示占位提示；未跟踪文件直接读盘（≤2000 行按新增渲染，超出截断并提示），其二进制判定 = 前 8KB 含 NUL 字节。
-- **远端**：`ssh_session::exec_capture` 运行同款 git 命令，预算常量沿用 `remote_git.rs` 的 `STATUS_BUDGET` 模式；远端未跟踪文件改用 `head -c` 经 exec 通道读原文（避开 `git diff --no-index` 退出码 1 丢 stdout 的陷阱），远端 root 冻结在点击时刻为已知局限。
+- **本地**：后台线程跑 `git diff --no-color [--cached | HEAD] -- <path>`（`std::process::Command` 经 `side_panel::run_git`——内部走 `platform::process::hidden_command`，自带超时与日志）；已跟踪二进制文件由 git diff 输出的 `Binary files … differ` 行识别，显示占位提示；未跟踪文件直接读盘（≤2000 行按新增渲染，超出截断并提示），其二进制判定 = 前 8KB 含 NUL 字节。已知取舍：未跟踪文件先全量读盘再截断（后台线程瞬时内存尖峰，见 §11）。
+- **远端**：`ssh_session::exec_capture` 运行同款 git 命令，预算常量沿用 `remote_git.rs` 的 `STATUS_BUDGET` 模式；远端未跟踪文件改用 `head -c` 经 exec 通道读原文（避开 `git diff --no-index` 退出码 1 丢 stdout 的陷阱），远端 root 冻结在点击时刻为已知局限。已知假定：远端登录 shell 须为 POSIX 形态（`head -c`、单引号转义、`git -C`）——与远端 Git 面板同一假定，Windows cmd 远端不可用。
 - **超时**：本地/远端均 15s 上限，超时进 Error 态可重试。
 - **刷新**：浮层 render 入口用 `Arc::ptr_eq` 比较 Git 快照（与 `VcsList::sync` 同款检测）——快照更新且文件仍在对应列表 → 自动重取；文件已不在 → 自动关闭浮层。
 - **生命周期**：generation 归 `DiffOverlayState` 所有，workspace entity 销毁即回收；旧 generation 结果一律丢弃（不覆盖新状态）。
@@ -143,6 +143,8 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 - 字符级 intra-line 高亮。
 - 目录级整组 stage/unstage/discard 操作。
 - 浮层内编辑文件、多文件 tab 式 diff 队列。
+- diff 内容的文本选择复制（当前为纯文本展示，无选择能力；后续切片）。
+- 未跟踪文件的限量读盘（当前先全量读再截断，见 §11）。
 - WSL 仓库的 diff 取数（本地 pane 命中 WSL 仓库时浮层走原生命令，预期落错误态；后续单独切片）。
 
 ## 11. 行数预算与风险
