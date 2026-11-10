@@ -59,7 +59,7 @@ fn local_fetch_covers_staged_unstaged_untracked_binary() {
 fn remote_command_shapes_are_shell_safe() {
     let site = fetch::Site::Remote { destination: "h".into(), root: "/my repo".into() };
     let cmd = fetch::remote_command(&site, "src/a b.rs", fetch::Semantics::Staged);
-    assert!(cmd.starts_with("git -C '/my repo' diff"));
+    assert!(cmd.starts_with("git -C '/my repo' --no-optional-locks diff"));
     assert!(cmd.contains("--cached"));
     assert!(cmd.contains("'src/a b.rs'"));
     let conflict = fetch::remote_command(&site, "f.rs", fetch::Semantics::ConflictVsHead);

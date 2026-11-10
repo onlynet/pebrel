@@ -178,6 +178,14 @@ impl RemoteGit {
         self.destination = destination.to_string();
         self.root = root.to_string();
     }
+
+    /// 测试缝：直接写入浮层的快照源（生产由 refresh_remote_git 落地）。驱动
+    /// 浮层「快照更新重取 / 文件消失关闭」的用例——本地快照源是 side_panel
+    /// 内部状态，测试无法注入，只能沿远端源编排。
+    #[cfg(test)]
+    pub(super) fn test_snapshot(&mut self, snap: Option<Arc<GitInfo>>) {
+        self.snapshot = snap;
+    }
 }
 
 /// 面板根的决策（与侧栏分组键同一优先序，见 [`super::task_groups_ssh`]）：

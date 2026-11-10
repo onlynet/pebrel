@@ -66,7 +66,9 @@ impl std::fmt::Debug for Fetched {
 }
 
 /// 远端命令拼装：路径一律经 ai_hook::remote::quote 单引号包裹（与远端
-/// Git 面板同一转义规则，空格、`$` 都安全到达远端 shell）。未跟踪文件
+/// Git 面板同一转义规则，空格、`$` 都安全到达远端 shell）；
+/// `--no-optional-locks` 与本地孪生（local_blocking）同款——后台读操作
+/// 不落 index.lock。未跟踪文件
 /// 不走 git diff——捕获层对非零退出直接丢 stdout，而
 /// `git diff --no-index` 有差异时退出码为 1，改用 `head -c` 按字节上限
 /// 直读全文。远端通道的工作目录是远端 HOME 而非仓库根，路径必须与根
@@ -76,7 +78,10 @@ pub(super) fn remote_command(site: &Site, path: &str, semantics: Semantics) -> S
     if semantics == Semantics::Untracked {
         return format!("head -c {UNTRACKED_BYTES} -- {}", quote(&format!("{root}/{path}")));
     }
-    let mut cmd = format!("git -C {} diff --no-color --no-ext-diff --no-textconv", quote(root));
+    let mut cmd = format!(
+        "git -C {} --no-optional-locks diff --no-color --no-ext-diff --no-textconv",
+        quote(root)
+    );
     if semantics == Semantics::Staged {
         cmd.push_str(" --cached");
     } else if semantics == Semantics::ConflictVsHead {
@@ -96,9 +101,12 @@ async fn remote_exec(destination: &str, command: &str) -> Option<Result<String, 
     let destination = destination.to_owned();
     let command = command.to_owned();
     super::super::remote_files::remote_call(|| async move {
-        crate::ssh_session::exec_capture(&destination, &command, b"", DIFF_BUDGET)
-            .await
-            .map_err(|_| ())
+        crate::ssh_session::exec_capture(&destination, &command, b"", DIFF_BUDGET).await.map_err(
+            |err| {
+                // 折叠进统一 Err 合同前保留原因（run_git 失败日志同款）。
+                log::debug!("git diff exec failed in {destination}: {err}");
+            },
+        )
     })
     .await
 }

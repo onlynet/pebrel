@@ -100,6 +100,18 @@ impl DiffOverlayState {
         self.target.as_ref().map(|t| t.site.clone())
     }
 
+    /// 测试探针：头部显示的相对路径（原地换文件的断言用）。
+    #[cfg(test)]
+    fn overlay_target_path(&self) -> Option<String> {
+        self.target.as_ref().map(|t| t.path.clone())
+    }
+
+    /// 测试探针：头部状态字母（快照重取后的状态刷新断言用）。
+    #[cfg(test)]
+    fn overlay_target_status(&self) -> Option<char> {
+        self.target.as_ref().map(|t| t.status)
+    }
+
     /// 测试探针：内容是否已落地（Loaded 态）。
     #[cfg(test)]
     fn overlay_loaded(&self) -> bool {
@@ -283,10 +295,19 @@ impl NebulaWorkspace {
                 .map(|seen| !Arc::ptr_eq(seen, current))
                 .unwrap_or(true);
             if changed {
-                let target = self.diff_overlay.target.clone().unwrap();
-                if !target_still_listed(current, &target.path, target.semantics) {
-                    self.close_diff_overlay(window, cx);
-                    return None;
+                let mut target = self.diff_overlay.target.clone().unwrap();
+                match listed_entry(current, &target.path, target.semantics) {
+                    None => {
+                        self.close_diff_overlay(window, cx);
+                        return None;
+                    },
+                    // 快照更新可能改变文件状态（M→D 等）：头部状态字母随重取
+                    // 同步刷新，不再冻结在点击时刻；查找与关闭判定共用同一
+                    // 列表语义（listed_entry）。
+                    Some((status, _)) => {
+                        target.status = *status;
+                        self.diff_overlay.target = Some(target.clone());
+                    },
                 }
                 self.diff_overlay.seen_snapshot = snapshot.clone();
                 self.diff_overlay.generation = self.diff_overlay.generation.wrapping_add(1);
@@ -746,12 +767,29 @@ fn loaded_item_count(loaded: &Loaded, mode: DiffMode) -> usize {
     }
 }
 
-/// 快照更新后目标文件是否仍在对应列表（`GitInfo` 在上游，判定放浮层侧）。
-fn target_still_listed(info: &GitInfo, path: &str, semantics: fetch::Semantics) -> bool {
+/// 快照更新后目标文件在「与抽屉显示一致」语义下的列表条目（`GitInfo`
+/// 在上游，判定放浮层侧）：None = 已不在列表（关闭判定），Some 携带
+/// 条目（状态刷新用）。
+fn listed_entry<'a>(
+    info: &'a GitInfo,
+    path: &str,
+    semantics: fetch::Semantics,
+) -> Option<&'a (char, String)> {
     let list = match semantics {
         fetch::Semantics::Staged => &info.staged,
         fetch::Semantics::ConflictVsHead => &info.conflicts,
         _ => &info.unstaged,
     };
-    list.iter().any(|(_, p)| p == path)
+    // 抽屉把冲突路径从 staged/changes 段排除、只在冲突段渲染（list_model
+    // 的 exclude_conflicts 语义）；真实数据里冲突路径同时保留在原始列表
+    // （GitInfo.conflicts 字段合同）。刚转入冲突的文件在抽屉原段已消失，
+    // 若按原始列表判「仍在」会让浮层以旧语义继续重取——点击语义实际已
+    // 变成冲突 vs HEAD——与用户所见脱节。这里同步排除，让它落入
+    // 「不在列表 → 关闭」分支。
+    if !matches!(semantics, fetch::Semantics::ConflictVsHead)
+        && info.conflicts.iter().any(|(_, p)| p == path)
+    {
+        return None;
+    }
+    list.iter().find(|(_, p)| p == path)
 }

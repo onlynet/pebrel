@@ -5,8 +5,10 @@ use gpui::{Modifiers, TestAppContext};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// 探针同时画抽屉行列表与浮层：行列表提供可点击的真实控件，浮层
-/// 挂载顺序与 render.rs 一致（列表之上、后画者盖前）。
+/// 探针同时画抽屉行列表与浮层：行列表提供可点击的真实控件，浮层挂载
+/// 几何与 render.rs 一致——盖「中间卡」（自己的 relative 容器内
+/// absolute inset_0），不遮抽屉行；否则「浮层开着点其他文件」的真实
+/// 点击路径在测试里不可达。
 struct OverlayProbe(Entity<NebulaWorkspace>);
 impl Render for OverlayProbe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -16,7 +18,12 @@ impl Render for OverlayProbe {
             .h(px(400.0))
             .flex()
             .child(self.0.update(cx, |ws, cx| ws.render_vcs_list(cx)))
-            .children(self.0.update(cx, |ws, cx| ws.render_diff_overlay(window, cx)))
+            .child(
+                div()
+                    .relative()
+                    .w(px(320.0))
+                    .children(self.0.update(cx, |ws, cx| ws.render_diff_overlay(window, cx))),
+            )
     }
 }
 
@@ -628,6 +635,261 @@ fn overlay_mode_persists_across_files(cx: &mut TestAppContext) {
             assert_eq!(
                 left.size.height, right.size.height,
                 "one-sided row: the empty half must stretch to the wrapped sibling's height"
+            );
+        },
+    );
+}
+
+/// 重画探针：render_diff_overlay 的快照/tab 判定在 draw 时同步执行。
+fn redraw_overlay(probe: &Entity<OverlayProbe>, cx: &mut gpui::VisualTestContext) {
+    cx.update(|window, cx| {
+        probe.update(cx, |_, cx| cx.notify());
+        let _ = window.draw(cx);
+    });
+}
+
+/// 远端快照用例共用编排：绑定远端目标、预置初始快照、列表切远端形态
+/// （行点击解析出 Site::Remote），点击文件行打开浮层，再按当前 generation
+/// 注入一份成功结果推进 Loaded——远端 exec 在测试里不可用（remote_exec
+/// 返回 None 落 Error），stale 测试同款模型级注入。返回打开时的
+/// generation。快照驱动的用例必须沿远端源编排：本地快照源是 side_panel
+/// 内部状态，测试无法注入。
+fn open_remote_overlay_loaded(
+    owner: &Entity<NebulaWorkspace>,
+    probe: &Entity<OverlayProbe>,
+    cx: &mut gpui::VisualTestContext,
+    snapshot: Arc<GitInfo>,
+    row_selector: &'static str,
+) -> u64 {
+    cx.update(|_, cx| {
+        owner.update(cx, |ws, _| {
+            ws.remote_git.test_bind("dest", "/repo");
+            ws.remote_git.test_snapshot(Some(snapshot.clone()));
+            ws.vcs_list.sync(
+                Some(snapshot),
+                GitPanelView::Changes,
+                Some(PathBuf::from("/repo")),
+                true,
+            );
+        });
+    });
+    redraw_overlay(probe, cx);
+    let bounds =
+        cx.debug_bounds(row_selector).unwrap_or_else(|| panic!("{row_selector} must render"));
+    cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+        "the remote row click must open the overlay"
+    );
+    let generation = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+    cx.update(|_, cx| {
+        owner.update(cx, |ws, cx| {
+            ws.apply_fetch_result(
+                generation,
+                Ok(fetch::Fetched::Untracked { lines: vec!["one".to_string()], truncated: false }),
+                cx,
+            );
+        });
+    });
+    assert!(
+        owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+        "the injected result must land the overlay in Loaded"
+    );
+    generation
+}
+
+/// 面板开着点其他文件 → 原地换内容（设计 §5.1）：浮层全程不关、
+/// generation +1、phase 先回 Loading 再 Loaded、头部路径换成新文件。
+#[gpui::test]
+fn clicking_another_file_replaces_content_in_place(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo {
+            unstaged: vec![('M', "a.txt".into()), ('M', "b.txt".into())],
+            ..GitInfo::default()
+        },
+        |owner, probe, root, cx| {
+            init_repo(&root);
+            for name in ["a.txt", "b.txt"] {
+                std::fs::write(root.join(name), "one\ntwo\n").unwrap();
+            }
+            run_git(&root, &["add", "a.txt", "b.txt"]);
+            for name in ["a.txt", "b.txt"] {
+                std::fs::write(root.join(name), "one\nTWO\n").unwrap();
+            }
+            let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+                let bounds = cx.debug_bounds(selector).expect("row rendered");
+                cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+            };
+            redraw_overlay(&probe, cx);
+            click(cx, "git-tree-row-changes-0-a.txt");
+            cx.run_until_parked();
+            assert!(owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()));
+            let first = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_path()),
+                Some("a.txt".to_string()),
+                "sanity: the first click owns the header path"
+            );
+            // 点 b 行：浮层保持打开，generation 递增；phase 经 Loading 再回
+            // Loaded——本地取数在确定性调度器上随事件派发同步落地（见
+            // single_click 测试同注），Loading 窗口不可观测，以排空后的
+            // Loaded + 新 generation 断言换内容成立。
+            click(cx, "git-tree-row-changes-1-b.txt");
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "switching files must keep the overlay open"
+            );
+            cx.run_until_parked();
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+                first + 1,
+                "switching files advances the generation once"
+            );
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                "b.txt must reach the Loaded phase"
+            );
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_path()),
+                Some("b.txt".to_string()),
+                "the header path must follow the newly clicked file"
+            );
+        },
+    );
+}
+
+/// 快照驱动的自动刷新（设计 §6）：快照更新且文件仍在 → 自动重取
+/// （generation +1、离开 Loaded）；文件已不在列表 → 下一次 render 自动
+/// 关闭。快照源沿远端路径编排（见 open_remote_overlay_loaded）。
+#[gpui::test]
+fn snapshot_refresh_refetches_and_disappearing_file_closes(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..GitInfo::default() },
+        |owner, probe, _root, cx| {
+            let opened = Arc::new(GitInfo {
+                unstaged: vec![('M', "src/a.rs".into())],
+                ..GitInfo::default()
+            });
+            let loaded_gen = open_remote_overlay_loaded(
+                &owner,
+                &probe,
+                cx,
+                opened,
+                "git-tree-row-changes-0-src/a.rs",
+            );
+            // (i) 快照更新（新 Arc）且文件仍在：必须自动重取——generation +1。
+            let still_listed = Arc::new(GitInfo {
+                unstaged: vec![('M', "src/a.rs".into())],
+                ..GitInfo::default()
+            });
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| ws.remote_git.test_snapshot(Some(still_listed)));
+            });
+            redraw_overlay(&probe, cx);
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+                loaded_gen + 1,
+                "a changed snapshot with the file still listed must refetch"
+            );
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "a still-listed file must keep the overlay open"
+            );
+            cx.run_until_parked();
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_phase_is_error()),
+                "the refetch must own the phase (remote exec is unavailable in tests)"
+            );
+            // (ii) 文件从列表消失：下一次 render 必须自动关闭。
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| {
+                    ws.remote_git.test_snapshot(Some(Arc::new(GitInfo::default())));
+                });
+            });
+            redraw_overlay(&probe, cx);
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "a snapshot without the file must close the overlay"
+            );
+        },
+    );
+}
+
+/// 快照重取必须同步头部状态字母（缺陷 B）：点击时 'M'、下一份快照变
+/// 'D'（M→D），头部不能冻结在点击时刻；generation 语义不变（重取 +1）。
+#[gpui::test]
+fn snapshot_refresh_updates_header_status_letter(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() },
+        |owner, probe, _root, cx| {
+            let opened =
+                Arc::new(GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() });
+            let loaded_gen = open_remote_overlay_loaded(
+                &owner,
+                &probe,
+                cx,
+                opened,
+                "git-tree-row-changes-0-a.txt",
+            );
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_status()),
+                Some('M'),
+                "sanity: the status letter starts at the click-time value"
+            );
+            let deleted =
+                Arc::new(GitInfo { unstaged: vec![('D', "a.txt".into())], ..GitInfo::default() });
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| ws.remote_git.test_snapshot(Some(deleted)));
+            });
+            redraw_overlay(&probe, cx);
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+                loaded_gen + 1,
+                "the status refresh rides the refetch; generation still advances once"
+            );
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_status()),
+                Some('D'),
+                "the header status letter must follow the new snapshot, not the click"
+            );
+        },
+    );
+}
+
+/// 文件转入冲突 → 关闭浮层（缺陷 A）：抽屉把冲突路径从 staged/changes 段
+/// 排除、只在冲突段渲染（list_model 的 exclude_conflicts）；真实数据里
+/// 冲突路径同时保留在 unstaged 原始列表（GitInfo.conflicts 字段合同）。
+/// 按原始列表判「仍在」会让浮层以旧语义继续重取，与抽屉所见脱节——判定
+/// 必须与抽屉显示一致：转入冲突即视为不在列表，关闭。
+#[gpui::test]
+fn file_turning_conflicted_closes_overlay(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() },
+        |owner, probe, _root, cx| {
+            let opened =
+                Arc::new(GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() });
+            open_remote_overlay_loaded(&owner, &probe, cx, opened, "git-tree-row-changes-0-a.txt");
+            // a.txt 同时出现在 unstaged 原始列表与 conflicts：抽屉的 changes
+            // 段已不再显示它（转入冲突段）——浮层必须按「不在列表」关闭。
+            let conflicted = Arc::new(GitInfo {
+                unstaged: vec![('M', "a.txt".into())],
+                conflicts: vec![('U', "a.txt".into())],
+                ..GitInfo::default()
+            });
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| ws.remote_git.test_snapshot(Some(conflicted)));
+            });
+            redraw_overlay(&probe, cx);
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "a file that moved into the conflicts section must close the overlay"
             );
         },
     );
