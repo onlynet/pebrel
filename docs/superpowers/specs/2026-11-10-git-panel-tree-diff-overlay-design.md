@@ -106,7 +106,7 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 
 新增 Message ID（命名以实现为准，均纯 append 进枚举与各语言表，回退合同遵循 `docs/internationalization.md`）：
 
-`VcsDiffWorktreeUnstaged`（工作区 · 未暂存）、`VcsDiffStagedHead`（已暂存 · vs HEAD）、`VcsDiffUntrackedFile`（未跟踪）、`VcsDiffConflictHead`（冲突 · vs HEAD）、`VcsDiffModeSplit`（对比）、`VcsDiffModeUnified`（统一）、`VcsDiffClose`（关闭）、`VcsDiffBinaryFile`（二进制文件，不支持差异显示）、`VcsDiffTooLarge`（超过 {lines} 行，已截断）、`VcsDiffRetry`（重试）、`VcsDiffFailed`（无法获取差异）。
+`VcsDiffWorktreeUnstaged`（工作区 · 未暂存）、`VcsDiffStagedHead`（已暂存 · vs HEAD）、`VcsDiffUntrackedFile`（未跟踪）、`VcsDiffConflictHead`（冲突 · vs HEAD）、`VcsDiffModeSplit`（拆分）、`VcsDiffModeUnified`（统一）、`VcsDiffClose`（关闭）、`VcsDiffBinaryFile`（二进制文件，不支持差异显示）、`VcsDiffTooLarge`（超过 {lines} 行，已截断）、`VcsDiffFailed`（无法加载差异）。重试按钮复用现有 `Message::CommonRetry`（与 `common.retry` 同源，避免重复英文源串触发 source_id 歧义）。
 
 ## 8. 测试策略
 

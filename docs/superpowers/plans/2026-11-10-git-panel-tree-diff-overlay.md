@@ -57,7 +57,6 @@
       "close": "Close diff",
       "binary": "Binary file; differences are not shown",
       "too_large": "Over {lines} lines; display truncated",
-      "retry": "Retry",
       "failed": "Could not load the diff",
       "no_changes": "No textual changes"
     },
@@ -73,13 +72,12 @@
       "staged_head": "已暂存 · vs HEAD",
       "untracked": "未跟踪",
       "conflict_head": "冲突 · vs HEAD",
-      "mode_split": "对比",
+      "mode_split": "拆分",
       "mode_unified": "统一",
       "close": "关闭差异",
       "binary": "二进制文件，不显示差异",
       "too_large": "超过 {lines} 行，已截断显示",
-      "retry": "重试",
-      "failed": "无法获取差异",
+      "failed": "无法加载差异",
       "no_changes": "无文本改动"
     },
 ```
@@ -91,7 +89,7 @@ python3 -c "
 import json
 en=json.load(open('nebula_app/i18n/en-US.json'))
 zh=json.load(open('nebula_app/i18n/zh-CN.json'))
-assert set(en['vcs']['diff']) == set(zh['vcs']['diff']) and len(en['vcs']['diff']) == 12
+assert set(en['vcs']['diff']) == set(zh['vcs']['diff']) and len(en['vcs']['diff']) == 11
 print('ok')"
 ```
 
@@ -1571,7 +1569,7 @@ fn render_unified_row(row: &pair::DisplayRow, theme: &dyn std::any::Any) -> gpui
 - `FullWidth` → 单行 `h_flex`，hunk 头（`text.starts_with("@@")`）用 `theme.primary` 文字 + 8% 透明背景；其余 note 用 muted。
 - `Context/Added/Deleted` → `h_flex`：行号槽 `w(px(48.0))` muted 右对齐（old/new 取其一：unified 用 `old.or(new)`），文本区 `flex_1` 等宽字体 `theme.mono_font_family`，`text_color`：Context 前景、Added `theme.success`、Deleted `theme.danger`；背景：Added `theme.success.opacity(0.13)`、Deleted `theme.danger.opacity(0.13)`；软换行（`.line_height(relative(1.35))`，不截断）。
 - `truncated` → 列表末尾静态追加一行 `language.format(Message::VcsDiffTooLarge, &[("lines", "2000")])` muted。
-- `Phase::Binary` / `Phase::NoChanges` / `Phase::Error` → 居中单行：`Message::VcsDiffBinary` / `Message::VcsDiffNoChanges` / `Message::VcsDiffFailed` + Error 态右侧 `Button::new("diff-retry").label(language.text(Message::VcsDiffRetry)).on_click(重发 spawn)`。
+- `Phase::Binary` / `Phase::NoChanges` / `Phase::Error` → 居中单行：`Message::VcsDiffBinary` / `Message::VcsDiffNoChanges` / `Message::VcsDiffFailed` + Error 态右侧 `Button::new("diff-retry").label(language.text(Message::CommonRetry)).on_click(重发 spawn)`。
 
 `gpui::list` 的行构造仿 `rows.rs::render_vcs_list`（owner downgrade + `update` 渲染单行）。
 
