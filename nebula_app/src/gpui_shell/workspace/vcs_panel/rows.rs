@@ -453,6 +453,17 @@ impl NebulaWorkspace {
                     }))
                     .into_any_element()
             },
+            // 目录行的最小占位渲染：树行模型（tree_rows）先落地，展开点击
+            // 与层级缩进由后续渲染任务接手。
+            VcsRow::Dir { name, count, .. } => h_flex()
+                .h(px(26.0))
+                .px_2()
+                .items_center()
+                .text_xs()
+                .text_color(muted)
+                .child(name)
+                .child(div().ml_2().child(count.to_string()))
+                .into_any_element(),
         };
         // 历史行必须首尾相接；通用的 4px 行底留白会把线路切成一段段。
         div().w_full().when(!history, |row| row.pb_1()).child(element).into_any_element()

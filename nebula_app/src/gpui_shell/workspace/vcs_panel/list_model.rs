@@ -29,6 +29,17 @@ pub(super) enum VcsRow {
         relative_path: String,
         ops: RowOps,
     },
+    Dir {
+        section_id: &'static str,
+        /// 完整目录相对路径（如 `src/ui`），展开状态键与点击都用它。
+        path: String,
+        /// 本级目录名（仅显示用）。
+        name: String,
+        depth: usize,
+        /// 该目录子树内变更文件总数。
+        count: usize,
+        expanded: bool,
+    },
 }
 
 pub(in crate::gpui_shell::workspace) struct VcsList {

@@ -14,6 +14,7 @@ mod avatars;
 mod commit_input;
 mod list_model;
 mod rows;
+mod tree_rows;
 pub(super) use list_model::VcsList;
 mod relative_time;
 pub(super) use commit_input::CommitInput;
@@ -1078,3 +1079,5 @@ mod tests {
 
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod list_tests;
+#[cfg(test)]
+mod tree_rows_tests;
