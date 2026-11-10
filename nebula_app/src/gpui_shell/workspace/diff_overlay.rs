@@ -10,6 +10,8 @@ use crate::i18n::Message;
 pub(super) mod fetch;
 mod pair;
 
+#[cfg(test)]
+mod fetch_tests;
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod tests;
 
@@ -94,6 +96,12 @@ impl DiffOverlayState {
         self.target.as_ref().map(|t| t.site.clone())
     }
 
+    /// 测试探针：内容是否已落地（Loaded 态）。
+    #[cfg(test)]
+    fn overlay_loaded(&self) -> bool {
+        matches!(self.phase, Phase::Loaded(_))
+    }
+
     /// 测试探针：伪装「打开时所基于的快照」，驱动 Some→None 关闭路径。
     #[cfg(test)]
     fn force_seen_snapshot(&mut self, snapshot: Option<Arc<GitInfo>>) {
@@ -138,6 +146,62 @@ impl NebulaWorkspace {
             self.diff_overlay.phase = Phase::Loading;
             cx.notify();
         }
+    }
+
+    /// 获取结果落地：generation 不匹配一律丢弃（不覆盖新状态）。
+    pub(in crate::gpui_shell::workspace) fn apply_fetch_result(
+        &mut self,
+        generation: u64,
+        fetched: Result<fetch::Fetched, ()>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff_overlay.generation != generation || self.diff_overlay.target.is_none() {
+            return;
+        }
+        self.diff_overlay.phase = match fetched {
+            Ok(fetch::Fetched::Patch(patch)) => {
+                let mut rows = Vec::new();
+                let mut pairs = Vec::new();
+                for file in &patch.files {
+                    rows.extend(pair::unified_rows(file));
+                    pairs.extend(pair::split_rows(file));
+                }
+                if rows.is_empty() {
+                    // 例如仅权限位变化：没有文本行，显示「无文本改动」。
+                    Phase::NoChanges
+                } else {
+                    Phase::Loaded(Box::new(Loaded { rows, pairs, truncated: false }))
+                }
+            },
+            Ok(fetch::Fetched::Untracked { lines, truncated }) => Phase::Loaded(Box::new(Loaded {
+                rows: pair::untracked_unified(&lines),
+                pairs: pair::untracked_split(&lines),
+                truncated,
+            })),
+            Ok(fetch::Fetched::Raw { lines, truncated }) => Phase::Raw { lines, truncated },
+            Ok(fetch::Fetched::Binary) => Phase::Binary,
+            Err(()) => Phase::Error,
+        };
+        // 列表计数只在落地时可知；这里同步 reset，避免渲染路径改 ListState。
+        // uniform 高度提示：未测量项按 22px 计，否则滚动条按已测范围钳制。
+        let item_count = match &self.diff_overlay.phase {
+            Phase::Loaded(loaded) => Some(loaded.rows.len()),
+            Phase::Raw { lines, .. } => Some(lines.len()),
+            _ => None,
+        };
+        if let Some(count) = item_count {
+            self.diff_overlay.scroll.reset_with_uniform_height(count, px(22.0));
+        }
+        cx.notify();
+    }
+
+    /// Error 态重试：同一目标重发获取，generation 递增作废在途响应。
+    fn retry_diff_fetch(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.diff_overlay.target.clone() else { return };
+        self.diff_overlay.phase = Phase::Loading;
+        self.diff_overlay.generation = self.diff_overlay.generation.wrapping_add(1);
+        fetch::spawn(self.diff_overlay.generation, &target, cx);
+        cx.notify();
     }
 
     /// render.rs 挂载点。tab 指纹变化 → 关闭；快照更新 → 文件仍在则重取、
@@ -270,10 +334,209 @@ impl NebulaWorkspace {
                     .text_color(theme.muted_foreground)
                     .child("⋯")
                     .into_any_element(),
-                _ => div().flex_1().into_any_element(),
+                Phase::Binary => centered_note(
+                    theme.muted_foreground,
+                    language.text(Message::VcsDiffBinary),
+                ),
+                Phase::NoChanges => centered_note(
+                    theme.muted_foreground,
+                    language.text(Message::VcsDiffNoChanges),
+                ),
+                Phase::Error => v_flex()
+                    .id("diff-overlay-error")
+                    .debug_selector(|| "diff-overlay-error".to_string())
+                    .flex_1()
+                    .min_h_0()
+                    .gap_2()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.muted_foreground)
+                    .child(language.text(Message::VcsDiffFailed))
+                    .child(
+                        Button::new("diff-retry")
+                            .label(language.text(Message::CommonRetry))
+                            .small()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.retry_diff_fetch(cx);
+                            })),
+                    )
+                    .into_any_element(),
+                // Task 7 只渲染 unified（mode 切换在 Task 8 接管分派）。
+                Phase::Loaded(loaded) => {
+                    let tail = truncated_tail(language, loaded.truncated);
+                    self.render_scrolled_overlay_body(tail, cx).into_any_element()
+                },
+                Phase::Raw { lines, truncated } => {
+                    let tail = truncated_tail(language, *truncated);
+                    self.render_scrolled_overlay_body(tail, cx).into_any_element()
+                },
             })
             .into_any_element()
     }
+
+    /// Loaded/Raw 共用的滚动体：虚拟列表（行渲染按 phase 分派）+ 截断尾行。
+    fn render_scrolled_overlay_body(
+        &self,
+        tail: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let scroll = self.diff_overlay.scroll.clone();
+        let owner = cx.entity().downgrade();
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("diff-overlay-body")
+                    .debug_selector(|| "diff-overlay-body".to_string())
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(
+                        gpui::list(scroll, move |index, _window, cx| {
+                            owner
+                                .update(cx, |workspace, cx| workspace.render_overlay_row(index, cx))
+                                .unwrap_or_else(|_| div().into_any_element())
+                        })
+                        .size_full(),
+                    ),
+            )
+            .when_some(tail, |body, tail| {
+                body.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .h(px(26.0))
+                        .items_center()
+                        .justify_center()
+                        .text_color(muted)
+                        .child(tail),
+                )
+            })
+    }
+
+    /// 虚拟列表行：Loaded → unified 行（Task 7 只此一种）；Raw → 等宽原文。
+    fn render_overlay_row(&mut self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let (row, raw) = match &self.diff_overlay.phase {
+            Phase::Loaded(loaded) => (loaded.rows.get(index), None),
+            Phase::Raw { lines, .. } => (None, lines.get(index)),
+            _ => return div().into_any_element(),
+        };
+        if let Some(line) = raw {
+            return h_flex()
+                .id(SharedString::from(format!("diff-overlay-row-raw-{index}")))
+                .debug_selector(move || format!("diff-overlay-row-raw-{index}"))
+                .w_full()
+                .px_3()
+                .py_1()
+                .items_start()
+                .font_family(theme.mono_font_family.clone())
+                .text_size(theme.font_size - px(1.0))
+                .text_color(theme.foreground)
+                .line_height(gpui::relative(1.35))
+                .child(line.clone())
+                .into_any_element();
+        }
+        let Some(row) = row else { return div().into_any_element() };
+        match row {
+            pair::DisplayRow::FullWidth { text } => {
+                // hunk 头高亮；note（"\ No newline..."）按弱化说明处理。
+                // 带 hunk 上下文的头可达数百字符：单行截断，不换行不撑高。
+                let hunk = text.starts_with("@@");
+                h_flex()
+                    .id(SharedString::from(format!("diff-overlay-row-unified-{index}")))
+                    .debug_selector(move || format!("diff-overlay-row-unified-{index}"))
+                    .w_full()
+                    .px_3()
+                    .h(px(22.0))
+                    .flex_shrink_0()
+                    .items_center()
+                    .when(hunk, |row| row.bg(theme.primary.opacity(0.08)))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(theme.font_size - px(1.0))
+                    .text_color(if hunk { theme.primary } else { theme.muted_foreground })
+                    .child(div().flex_1().min_w_0().truncate().child(text.clone()))
+                    .into_any_element()
+            },
+            pair::DisplayRow::Context { old, new, text } => {
+                unified_line_row(index, old.or(*new), text, theme.foreground, None, theme)
+            },
+            pair::DisplayRow::Added { new, text } => unified_line_row(
+                index,
+                *new,
+                text,
+                theme.success,
+                Some(theme.success.opacity(0.13)),
+                theme,
+            ),
+            pair::DisplayRow::Deleted { old, text } => unified_line_row(
+                index,
+                *old,
+                text,
+                theme.danger,
+                Some(theme.danger.opacity(0.13)),
+                theme,
+            ),
+        }
+    }
+}
+
+/// unified 代码行：行号槽（右对齐弱化）+ 可换行文本（不截断，软换行）。
+fn unified_line_row(
+    index: usize,
+    no: Option<u32>,
+    text: &str,
+    fg: gpui::Hsla,
+    bg: Option<gpui::Hsla>,
+    theme: &gpui_component::Theme,
+) -> gpui::AnyElement {
+    h_flex()
+        .id(SharedString::from(format!("diff-overlay-row-unified-{index}")))
+        .debug_selector(move || format!("diff-overlay-row-unified-{index}"))
+        .w_full()
+        .pl_3()
+        .pr_2()
+        .items_start()
+        .when_some(bg, |row, bg| row.bg(bg))
+        .child(
+            div()
+                .w(px(48.0))
+                .flex_shrink_0()
+                .text_right()
+                .font_family(theme.mono_font_family.clone())
+                .text_size(theme.font_size - px(1.0))
+                .text_color(theme.muted_foreground)
+                .child(no.map(|n| n.to_string()).unwrap_or_default()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .font_family(theme.mono_font_family.clone())
+                .text_size(theme.font_size - px(1.0))
+                .text_color(fg)
+                .line_height(gpui::relative(1.35))
+                .child(text.to_string()),
+        )
+        .into_any_element()
+}
+
+/// 二进制/无改动等占位态：居中弱化说明。
+fn centered_note(color: gpui::Hsla, text: &str) -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(color)
+        .child(text.to_string())
+        .into_any_element()
+}
+
+/// 截断尾行（超限提示，行数/字节两种成因通用）；未截断返回 None。
+fn truncated_tail(language: crate::i18n::UiLanguage, truncated: bool) -> Option<String> {
+    truncated.then(|| language.text(Message::VcsDiffTooLarge).to_string())
 }
 
 /// 快照更新后目标文件是否仍在对应列表（`GitInfo` 在上游，判定放浮层侧）。

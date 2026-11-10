@@ -1197,7 +1197,7 @@
       "mode_unified": "Unified",
       "close": "Close diff",
       "binary": "Binary file; differences are not shown",
-      "too_large": "Over {lines} lines; display truncated",
+      "too_large": "Content too large; display truncated",
       "failed": "Could not load the diff",
       "no_changes": "No textual changes"
     },

@@ -1197,7 +1197,7 @@
       "mode_unified": "统一",
       "close": "关闭差异",
       "binary": "二进制文件，不显示差异",
-      "too_large": "超过 {lines} 行，已截断显示",
+      "too_large": "内容过大，已截断显示",
       "failed": "无法加载差异",
       "no_changes": "无文本改动"
     },

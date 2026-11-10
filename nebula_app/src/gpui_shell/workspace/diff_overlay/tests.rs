@@ -43,7 +43,9 @@ fn workspace_with_changes(
         windowing::initialize(cx, crate::runtime_api::RuntimeHub::new());
     });
     let data = Arc::new(info);
-    let root = tempfile::tempdir().unwrap().path().to_path_buf();
+    // TempDir 守卫活到 body 之后：真实仓库测试要在 root 里落一个 git 仓库。
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
     let mut owner = None;
     let mut probe = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
@@ -76,8 +78,12 @@ fn workspace_with_changes(
     body(owner.unwrap(), probe.unwrap(), root, cx);
 }
 
+/// 单击打开浮层。本地取数在确定性调度器上随事件派发同步落地（Task 7 起
+/// fetch::spawn 真发命令），loading 窗口不再可观测；非仓库根必然落到
+/// Error 态，据此断言「打开 + 取数必然离开放 loading」。成功落地的
+/// 端到端路径由 overlay_loads_unified_diff_from_real_repo 覆盖。
 #[gpui::test]
-fn single_click_opens_overlay_in_loading_state(cx: &mut TestAppContext) {
+fn single_click_opens_overlay_and_local_fetch_resolves(cx: &mut TestAppContext) {
     workspace_with_changes(
         cx,
         GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..GitInfo::default() },
@@ -100,7 +106,12 @@ fn single_click_opens_overlay_in_loading_state(cx: &mut TestAppContext) {
             );
             redraw(cx);
             cx.debug_bounds("diff-overlay").expect("overlay mounted");
-            cx.debug_bounds("diff-overlay-loading").expect("loading shell visible");
+            assert!(
+                cx.debug_bounds("diff-overlay-loading").is_none(),
+                "local fetch resolves inline; the loading shell must be gone"
+            );
+            cx.debug_bounds("diff-overlay-error")
+                .expect("non-repo root lands the overlay in the error body with retry");
         },
     );
 }
@@ -225,6 +236,62 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
             assert!(
                 !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
                 "snapshot source vanished; overlay must close"
+            );
+        },
+    );
+}
+
+/// 真实仓库端到端：点击文件行 → background_spawn 上跑真 git → Loaded
+/// 态的 unified 行渲染出来（loading 壳消失）。覆盖取数、generation 落地
+/// 与渲染三层，而不是只测状态机。
+#[gpui::test]
+fn overlay_loads_unified_diff_from_real_repo(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() },
+        |owner, probe, root, cx| {
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            git(&["init", "-q"]);
+            git(&["config", "user.email", "t@t"]);
+            git(&["config", "user.name", "t"]);
+            std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+            git(&["add", "a.txt"]);
+            std::fs::write(root.join("a.txt"), "one\nTWO\n").unwrap();
+
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            redraw(cx);
+            let bounds =
+                cx.debug_bounds("git-tree-row-changes-0-a.txt").expect("file row rendered");
+            cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+            // 排空后台取数（真实 git 子进程在 TestScheduler 上同步跑完）。
+            cx.run_until_parked();
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                "fetch result must land the overlay in the Loaded phase"
+            );
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-body").expect("scrolled body mounted");
+            cx.debug_bounds("diff-overlay-row-unified-0").expect("first unified row rendered");
+            assert!(
+                cx.debug_bounds("diff-overlay-loading").is_none(),
+                "loading shell must be gone once loaded"
             );
         },
     );
