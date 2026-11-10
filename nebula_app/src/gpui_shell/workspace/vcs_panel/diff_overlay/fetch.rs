@@ -100,7 +100,9 @@ pub(super) fn remote_command(site: &Site, path: &str, semantics: Semantics) -> S
 async fn remote_exec(destination: &str, command: &str) -> Option<Result<String, ()>> {
     let destination = destination.to_owned();
     let command = command.to_owned();
-    super::super::remote_files::remote_call(|| async move {
+    // 模块现挂 vcs_panel/diff_overlay 下：remote_files 经 `use super::*` 链
+    // （diff_overlay → vcs_panel → workspace）按名可见，无需写全路径。
+    remote_files::remote_call(|| async move {
         crate::ssh_session::exec_capture(&destination, &command, b"", DIFF_BUDGET).await.map_err(
             |err| {
                 // 折叠进统一 Err 合同前保留原因（run_git 失败日志同款）。

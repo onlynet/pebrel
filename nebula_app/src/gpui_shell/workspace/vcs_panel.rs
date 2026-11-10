@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 mod avatars;
 mod commit_input;
+mod diff_overlay;
 mod list_model;
 mod rows;
 mod tree_rows;

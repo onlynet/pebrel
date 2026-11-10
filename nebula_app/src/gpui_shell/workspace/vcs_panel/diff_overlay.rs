@@ -161,34 +161,37 @@ impl NebulaWorkspace {
         // 同目标判等必须连来源一起比：路径 + 语义相同但 site/remote 不同
         // （本地 pane 开着、抽屉切到远端视图再点同一路径）时若误判 no-op，
         // 浮层会继续显示上一个仓库的 diff。
-        let same = self.diff_overlay.target.as_ref().is_some_and(|t| {
+        let same = self.vcs_list.diff_overlay.target.as_ref().is_some_and(|t| {
             t.path == path && t.semantics == semantics && t.remote == remote && t.site == site
         });
         if same {
             return;
         }
         let target = OverlayTarget { site, path, semantics, status, remote };
-        self.diff_overlay.target = Some(target.clone());
-        self.diff_overlay.phase = Phase::Loading;
-        self.diff_overlay.generation = self.diff_overlay.generation.wrapping_add(1);
-        self.diff_overlay.seen_snapshot = self.current_vcs_snapshot();
-        self.diff_overlay.tab_fingerprint = (self.active, self.settings_open);
-        self.diff_overlay.scroll = gpui::ListState::new(0, gpui::ListAlignment::Top, px(22.0));
-        let handle = self.diff_overlay.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        self.vcs_list.diff_overlay.target = Some(target.clone());
+        self.vcs_list.diff_overlay.phase = Phase::Loading;
+        self.vcs_list.diff_overlay.generation =
+            self.vcs_list.diff_overlay.generation.wrapping_add(1);
+        self.vcs_list.diff_overlay.seen_snapshot = self.current_vcs_snapshot();
+        self.vcs_list.diff_overlay.tab_fingerprint = (self.active, self.settings_open);
+        self.vcs_list.diff_overlay.scroll =
+            gpui::ListState::new(0, gpui::ListAlignment::Top, px(22.0));
+        let handle =
+            self.vcs_list.diff_overlay.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         window.focus(&handle, cx);
-        fetch::spawn(self.diff_overlay.generation, &target, cx);
+        fetch::spawn(self.vcs_list.diff_overlay.generation, &target, cx);
         cx.notify();
     }
 
     pub(super) fn close_diff_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.diff_overlay.target.take().is_some() {
-            self.diff_overlay.phase = Phase::Loading;
+        if self.vcs_list.diff_overlay.target.take().is_some() {
+            self.vcs_list.diff_overlay.phase = Phase::Loading;
             // 焦点回活动 tab（设计 §5.3）。focus_active 对无可回落视图的
             // Empty 工作区是 no-op，此时 blur 掉浮层句柄：键盘焦点不能
             // 挂在即将卸载的元素上（否则 Esc/Tab 会派发到幽灵节点）。
             // 有 tab 时 focus_active 的 defer 焦点后于本 blur 生效，不受影响。
             self.focus_active(window, cx);
-            if let Some(handle) = self.diff_overlay.focus.as_ref() {
+            if let Some(handle) = self.vcs_list.diff_overlay.focus.as_ref() {
                 if handle.contains_focused(window, cx) {
                     window.blur();
                 }
@@ -204,10 +207,12 @@ impl NebulaWorkspace {
         fetched: Result<fetch::Fetched, ()>,
         cx: &mut Context<Self>,
     ) {
-        if self.diff_overlay.generation != generation || self.diff_overlay.target.is_none() {
+        if self.vcs_list.diff_overlay.generation != generation
+            || self.vcs_list.diff_overlay.target.is_none()
+        {
             return;
         }
-        self.diff_overlay.phase = match fetched {
+        self.vcs_list.diff_overlay.phase = match fetched {
             Ok(fetch::Fetched::Patch(patch)) => {
                 let mut rows = Vec::new();
                 let mut pairs = Vec::new();
@@ -234,23 +239,26 @@ impl NebulaWorkspace {
         // 列表计数只在落地时可知；这里同步 reset，避免渲染路径改 ListState。
         // 计数按当时模式的行形态取（loaded_item_count 与模式切换共用）。
         // uniform 高度提示：未测量项按 22px 计，否则滚动条按已测范围钳制。
-        let item_count = match &self.diff_overlay.phase {
-            Phase::Loaded(loaded) => Some(loaded_item_count(loaded, self.diff_overlay.mode)),
+        let item_count = match &self.vcs_list.diff_overlay.phase {
+            Phase::Loaded(loaded) => {
+                Some(loaded_item_count(loaded, self.vcs_list.diff_overlay.mode))
+            },
             Phase::Raw { lines, .. } => Some(lines.len()),
             _ => None,
         };
         if let Some(count) = item_count {
-            self.diff_overlay.scroll.reset_with_uniform_height(count, px(22.0));
+            self.vcs_list.diff_overlay.scroll.reset_with_uniform_height(count, px(22.0));
         }
         cx.notify();
     }
 
     /// Error 态重试：同一目标重发获取，generation 递增作废在途响应。
     fn retry_diff_fetch(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.diff_overlay.target.clone() else { return };
-        self.diff_overlay.phase = Phase::Loading;
-        self.diff_overlay.generation = self.diff_overlay.generation.wrapping_add(1);
-        fetch::spawn(self.diff_overlay.generation, &target, cx);
+        let Some(target) = self.vcs_list.diff_overlay.target.clone() else { return };
+        self.vcs_list.diff_overlay.phase = Phase::Loading;
+        self.vcs_list.diff_overlay.generation =
+            self.vcs_list.diff_overlay.generation.wrapping_add(1);
+        fetch::spawn(self.vcs_list.diff_overlay.generation, &target, cx);
         cx.notify();
     }
 
@@ -260,42 +268,44 @@ impl NebulaWorkspace {
     /// 计数重置连带位置回顶（模式持久即可，滚动位置不跨切换保留）。
     /// 同模式重复点击是 no-op（不重置计数/滚动）。
     fn toggle_diff_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {
-        if mode == self.diff_overlay.mode {
+        if mode == self.vcs_list.diff_overlay.mode {
             return;
         }
-        self.diff_overlay.mode = mode;
-        if let Phase::Loaded(loaded) = &self.diff_overlay.phase {
+        self.vcs_list.diff_overlay.mode = mode;
+        if let Phase::Loaded(loaded) = &self.vcs_list.diff_overlay.phase {
             let count = loaded_item_count(loaded, mode);
-            self.diff_overlay.scroll.reset_with_uniform_height(count, px(22.0));
+            self.vcs_list.diff_overlay.scroll.reset_with_uniform_height(count, px(22.0));
         }
         cx.notify();
     }
 
     /// render.rs 挂载点。tab 指纹变化 → 关闭；快照更新 → 文件仍在则重取、
     /// 不在则关。只做状态判定与调度，不同步等待任何 IO。
-    pub(super) fn render_diff_overlay(
+    /// 可见性放宽到 workspace：模块挂 vcs_panel 下，但挂载点在父层 render.rs。
+    pub(in crate::gpui_shell::workspace) fn render_diff_overlay(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if self.diff_overlay.target.is_none() {
+        if self.vcs_list.diff_overlay.target.is_none() {
             return None;
         }
         let fingerprint = (self.active, self.settings_open);
-        if fingerprint != self.diff_overlay.tab_fingerprint {
+        if fingerprint != self.vcs_list.diff_overlay.tab_fingerprint {
             self.close_diff_overlay(window, cx);
             return None;
         }
         let snapshot = self.current_vcs_snapshot();
         if let Some(current) = snapshot.as_ref() {
             let changed = self
+                .vcs_list
                 .diff_overlay
                 .seen_snapshot
                 .as_ref()
                 .map(|seen| !Arc::ptr_eq(seen, current))
                 .unwrap_or(true);
             if changed {
-                let mut target = self.diff_overlay.target.clone().unwrap();
+                let mut target = self.vcs_list.diff_overlay.target.clone().unwrap();
                 match listed_entry(current, &target.path, target.semantics) {
                     None => {
                         self.close_diff_overlay(window, cx);
@@ -306,15 +316,16 @@ impl NebulaWorkspace {
                     // 列表语义（listed_entry）。
                     Some((status, _)) => {
                         target.status = *status;
-                        self.diff_overlay.target = Some(target.clone());
+                        self.vcs_list.diff_overlay.target = Some(target.clone());
                     },
                 }
-                self.diff_overlay.seen_snapshot = snapshot.clone();
-                self.diff_overlay.generation = self.diff_overlay.generation.wrapping_add(1);
-                self.diff_overlay.phase = Phase::Loading;
-                fetch::spawn(self.diff_overlay.generation, &target, cx);
+                self.vcs_list.diff_overlay.seen_snapshot = snapshot.clone();
+                self.vcs_list.diff_overlay.generation =
+                    self.vcs_list.diff_overlay.generation.wrapping_add(1);
+                self.vcs_list.diff_overlay.phase = Phase::Loading;
+                fetch::spawn(self.vcs_list.diff_overlay.generation, &target, cx);
             }
-        } else if self.diff_overlay.seen_snapshot.is_some() {
+        } else if self.vcs_list.diff_overlay.seen_snapshot.is_some() {
             // 列表来源整体消失（仓库退出/刷新失败）：按「文件已不在列表」的
             // 保守延伸直接关闭，不留指向已消失快照的浮层。
             self.close_diff_overlay(window, cx);
@@ -324,7 +335,7 @@ impl NebulaWorkspace {
     }
 
     fn current_vcs_snapshot(&self) -> Option<Arc<GitInfo>> {
-        match self.diff_overlay.target.as_ref().map(|t| t.remote) {
+        match self.vcs_list.diff_overlay.target.as_ref().map(|t| t.remote) {
             Some(true) => self.remote_git.snapshot_for_overlay(),
             _ => self.side_panel.git_snapshot(),
         }
@@ -333,22 +344,30 @@ impl NebulaWorkspace {
     fn render_overlay_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let language = crate::gpui_shell::config::ui_language(cx);
-        let status = self.diff_overlay.target.as_ref().map(|t| t.status);
-        let path: SharedString =
-            self.diff_overlay.target.as_ref().map(|t| t.path.clone()).unwrap_or_default().into();
-        let semantics_label = self.diff_overlay.target.as_ref().map(|t| match t.semantics {
-            fetch::Semantics::Unstaged => language.text(Message::VcsDiffWorktreeUnstaged),
-            fetch::Semantics::Staged => language.text(Message::VcsDiffStagedHead),
-            fetch::Semantics::Untracked => language.text(Message::VcsDiffUntracked),
-            fetch::Semantics::ConflictVsHead => language.text(Message::VcsDiffConflictHead),
-        });
+        let status = self.vcs_list.diff_overlay.target.as_ref().map(|t| t.status);
+        let path: SharedString = self
+            .vcs_list
+            .diff_overlay
+            .target
+            .as_ref()
+            .map(|t| t.path.clone())
+            .unwrap_or_default()
+            .into();
+        let semantics_label =
+            self.vcs_list.diff_overlay.target.as_ref().map(|t| match t.semantics {
+                fetch::Semantics::Unstaged => language.text(Message::VcsDiffWorktreeUnstaged),
+                fetch::Semantics::Staged => language.text(Message::VcsDiffStagedHead),
+                fetch::Semantics::Untracked => language.text(Message::VcsDiffUntracked),
+                fetch::Semantics::ConflictVsHead => language.text(Message::VcsDiffConflictHead),
+            });
         let status_color = status.map(|status| match status {
             'A' | '?' => theme.success,
             'D' | '!' => theme.danger,
             'C' | 'U' => theme.danger,
             _ => theme.warning,
         });
-        let handle = self.diff_overlay.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        let handle =
+            self.vcs_list.diff_overlay.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         div()
             .id("diff-overlay")
             .debug_selector(|| "diff-overlay".to_string())
@@ -406,7 +425,7 @@ impl NebulaWorkspace {
                     // 会让未选侧成空钮）。
                     .child(crate::gpui_shell::widgets::segmented::SegmentedRow::new(
                         "diff-mode",
-                        match self.diff_overlay.mode {
+                        match self.vcs_list.diff_overlay.mode {
                             DiffMode::Split => 0,
                             DiffMode::Unified => 1,
                         },
@@ -418,7 +437,7 @@ impl NebulaWorkspace {
                                     .debug_selector(|| "diff-mode-split".to_string())
                                     .ghost()
                                     .small()
-                                    .toggled(self.diff_overlay.mode == DiffMode::Split)
+                                    .toggled(self.vcs_list.diff_overlay.mode == DiffMode::Split)
                                     .tooltip(language.text(Message::VcsDiffModeSplit))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.toggle_diff_mode(DiffMode::Split, cx);
@@ -430,7 +449,7 @@ impl NebulaWorkspace {
                                     .debug_selector(|| "diff-mode-unified".to_string())
                                     .ghost()
                                     .small()
-                                    .toggled(self.diff_overlay.mode == DiffMode::Unified)
+                                    .toggled(self.vcs_list.diff_overlay.mode == DiffMode::Unified)
                                     .tooltip(language.text(Message::VcsDiffModeUnified))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.toggle_diff_mode(DiffMode::Unified, cx);
@@ -452,7 +471,7 @@ impl NebulaWorkspace {
                             })),
                     ),
             )
-            .child(match &self.diff_overlay.phase {
+            .child(match &self.vcs_list.diff_overlay.phase {
                 Phase::Loading => div()
                     .id("diff-overlay-loading")
                     .debug_selector(|| "diff-overlay-loading".to_string())
@@ -510,7 +529,7 @@ impl NebulaWorkspace {
         tail: Option<String>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let scroll = self.diff_overlay.scroll.clone();
+        let scroll = self.vcs_list.diff_overlay.scroll.clone();
         let owner = cx.entity().downgrade();
         let muted = cx.theme().muted_foreground;
         v_flex()
@@ -549,8 +568,8 @@ impl NebulaWorkspace {
     /// 越界槽位（模式切换后计数差异的残留）画空行；Raw → 等宽原文。
     fn render_overlay_row(&mut self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
-        let mode = self.diff_overlay.mode;
-        let (row, pair, raw) = match &self.diff_overlay.phase {
+        let mode = self.vcs_list.diff_overlay.mode;
+        let (row, pair, raw) = match &self.vcs_list.diff_overlay.phase {
             Phase::Loaded(loaded) => match mode {
                 DiffMode::Unified => (loaded.rows.get(index), None, None),
                 DiffMode::Split => (None, loaded.pairs.get(index), None),

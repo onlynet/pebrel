@@ -121,7 +121,7 @@ fn single_click_opens_overlay_and_local_fetch_resolves(cx: &mut TestAppContext) 
             cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
             cx.run_until_parked();
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "single click on a file row must open the diff overlay"
             );
             redraw(cx);
@@ -153,7 +153,7 @@ fn svn_click_keeps_selection_without_overlay(cx: &mut TestAppContext) {
             cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
             cx.run_until_parked();
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "svn rows must not open the git diff overlay"
             );
             assert_eq!(
@@ -186,11 +186,11 @@ fn same_path_different_site_is_not_a_noop(cx: &mut TestAppContext) {
             });
         };
         open_local(cx, "/a");
-        let first = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+        let first = owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation());
         // 完全相同的目标：无操作（generation 不动）。
         open_local(cx, "/a");
         assert_eq!(
-            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+            owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation()),
             first,
             "identical target is a no-op"
         );
@@ -209,12 +209,12 @@ fn same_path_different_site_is_not_a_noop(cx: &mut TestAppContext) {
             });
         });
         assert_eq!(
-            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+            owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation()),
             first + 1,
             "different site/remote must not be a no-op"
         );
         assert_eq!(
-            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_site()),
+            owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_target_site()),
             Some(fetch::Site::Local { root: PathBuf::from("/b") })
         );
     });
@@ -242,14 +242,16 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
                 });
             });
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "open must take effect before the vanish edge"
             );
             cx.update(|_, cx| {
                 owner.update(cx, |ws, _| {
                     // 侧栏从未 sync：current_vcs_snapshot() 为 None。伪装
                     // 「打开时基于过一份快照」，制造 Some→None 的消失沿。
-                    ws.diff_overlay.force_seen_snapshot(Some(Arc::new(GitInfo::default())));
+                    ws.vcs_list
+                        .diff_overlay
+                        .force_seen_snapshot(Some(Arc::new(GitInfo::default())));
                 });
             });
             cx.update(|window, cx| {
@@ -257,7 +259,7 @@ fn snapshot_vanishing_closes_the_overlay(cx: &mut TestAppContext) {
                 let _ = window.draw(cx);
             });
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "snapshot source vanished; overlay must close"
             );
         },
@@ -295,7 +297,7 @@ fn overlay_closes_via_button_escape_and_context_change(cx: &mut TestAppContext) 
             cx.simulate_mouse_up(close.center(), MouseButton::Left, Modifiers::default());
             cx.run_until_parked();
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "the close button must close the overlay"
             );
             redraw(cx);
@@ -308,7 +310,7 @@ fn overlay_closes_via_button_escape_and_context_change(cx: &mut TestAppContext) 
             open(cx);
             cx.update(|window, cx| {
                 assert!(
-                    owner.read(cx).diff_overlay.overlay_focused(window, cx),
+                    owner.read(cx).vcs_list.diff_overlay.overlay_focused(window, cx),
                     "an open overlay must hold keyboard focus"
                 );
             });
@@ -319,7 +321,7 @@ fn overlay_closes_via_button_escape_and_context_change(cx: &mut TestAppContext) 
             });
             cx.run_until_parked();
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "escape must close the overlay"
             );
             // (c) tab 指纹：settings_open 翻转（等价于点任务栏切走的机制），
@@ -330,7 +332,7 @@ fn overlay_closes_via_button_escape_and_context_change(cx: &mut TestAppContext) 
             });
             redraw(cx);
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "a tab fingerprint change must close the overlay"
             );
         },
@@ -360,7 +362,7 @@ fn overlay_takes_and_releases_focus(cx: &mut TestAppContext) {
             redraw(cx);
             cx.update(|window, cx| {
                 assert!(
-                    owner.read(cx).diff_overlay.overlay_focused(window, cx),
+                    owner.read(cx).vcs_list.diff_overlay.overlay_focused(window, cx),
                     "opening the overlay must move keyboard focus into it"
                 );
             });
@@ -371,7 +373,7 @@ fn overlay_takes_and_releases_focus(cx: &mut TestAppContext) {
             redraw(cx);
             cx.update(|window, cx| {
                 assert!(
-                    !owner.read(cx).diff_overlay.overlay_focused(window, cx),
+                    !owner.read(cx).vcs_list.diff_overlay.overlay_focused(window, cx),
                     "closing the overlay must release its focus"
                 );
             });
@@ -407,7 +409,7 @@ fn overlay_renders_split_and_toggles_to_unified(cx: &mut TestAppContext) {
             // 排空后台取数（真实 git 子进程在 TestScheduler 上同步跑完）。
             cx.run_until_parked();
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
                 "fetch result must land the overlay in the Loaded phase"
             );
             redraw(cx);
@@ -436,7 +438,7 @@ fn overlay_renders_split_and_toggles_to_unified(cx: &mut TestAppContext) {
             // hunk 带 + context 对 + 删/增对 vs 四条 unified 行），否则末行
             // （+TWO，index 3）落在计数之外永远不渲染。滚到末尾验证可达。
             cx.update(|_, cx| {
-                owner.update(cx, |ws, _| ws.diff_overlay.overlay_scroll_to_end());
+                owner.update(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_scroll_to_end());
             });
             redraw(cx);
             cx.debug_bounds("diff-overlay-row-unified-3")
@@ -485,11 +487,11 @@ fn remote_fetch_unavailable_lands_in_error_phase(cx: &mut TestAppContext) {
             cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
             cx.run_until_parked();
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "a remote file row must open the overlay"
             );
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_phase_is_error()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_phase_is_error()),
                 "an unavailable remote fetch must land in the error phase, not stay loading"
             );
             redraw(cx);
@@ -523,10 +525,10 @@ fn stale_generation_result_is_dropped(cx: &mut TestAppContext) {
             });
         };
         open(cx, "a.txt");
-        let stale = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+        let stale = owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation());
         open(cx, "b.txt");
         assert_eq!(
-            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+            owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation()),
             stale + 1,
             "opening another file must advance the generation"
         );
@@ -543,12 +545,12 @@ fn stale_generation_result_is_dropped(cx: &mut TestAppContext) {
             });
         });
         assert!(
-            !owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+            !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
             "a stale-generation success must be dropped wholesale"
         );
         cx.run_until_parked();
         assert!(
-            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_phase_is_error()),
+            owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_phase_is_error()),
             "after parking, the current generation's outcome must own the phase"
         );
     });
@@ -596,7 +598,7 @@ fn overlay_mode_persists_across_files(cx: &mut TestAppContext) {
             redraw(cx);
             click(cx, "git-tree-row-changes-0-a.txt");
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
                 "a.txt must reach the Loaded phase"
             );
             redraw(cx);
@@ -606,14 +608,14 @@ fn overlay_mode_persists_across_files(cx: &mut TestAppContext) {
                 owner.update(cx, |ws, cx| ws.close_diff_overlay(window, cx));
             });
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "close_diff_overlay must close before the second file"
             );
             // long.txt：模式必须仍是 unified。
             redraw(cx);
             click(cx, "git-tree-row-changes-1-long.txt");
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
                 "long.txt must reach the Loaded phase"
             );
             redraw(cx);
@@ -680,10 +682,10 @@ fn open_remote_overlay_loaded(
     cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
     assert!(
-        owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+        owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
         "the remote row click must open the overlay"
     );
-    let generation = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+    let generation = owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation());
     cx.update(|_, cx| {
         owner.update(cx, |ws, cx| {
             ws.apply_fetch_result(
@@ -694,7 +696,7 @@ fn open_remote_overlay_loaded(
         });
     });
     assert!(
-        owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+        owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
         "the injected result must land the overlay in Loaded"
     );
     generation
@@ -727,10 +729,10 @@ fn clicking_another_file_replaces_content_in_place(cx: &mut TestAppContext) {
             redraw_overlay(&probe, cx);
             click(cx, "git-tree-row-changes-0-a.txt");
             cx.run_until_parked();
-            assert!(owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()));
-            let first = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+            assert!(owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()));
+            let first = owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation());
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_path()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_target_path()),
                 Some("a.txt".to_string()),
                 "sanity: the first click owns the header path"
             );
@@ -740,21 +742,21 @@ fn clicking_another_file_replaces_content_in_place(cx: &mut TestAppContext) {
             // Loaded + 新 generation 断言换内容成立。
             click(cx, "git-tree-row-changes-1-b.txt");
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "switching files must keep the overlay open"
             );
             cx.run_until_parked();
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation()),
                 first + 1,
                 "switching files advances the generation once"
             );
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
                 "b.txt must reach the Loaded phase"
             );
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_path()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_target_path()),
                 Some("b.txt".to_string()),
                 "the header path must follow the newly clicked file"
             );
@@ -792,17 +794,17 @@ fn snapshot_refresh_refetches_and_disappearing_file_closes(cx: &mut TestAppConte
             });
             redraw_overlay(&probe, cx);
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation()),
                 loaded_gen + 1,
                 "a changed snapshot with the file still listed must refetch"
             );
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "a still-listed file must keep the overlay open"
             );
             cx.run_until_parked();
             assert!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_phase_is_error()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_phase_is_error()),
                 "the refetch must own the phase (remote exec is unavailable in tests)"
             );
             // (ii) 文件从列表消失：下一次 render 必须自动关闭。
@@ -813,7 +815,7 @@ fn snapshot_refresh_refetches_and_disappearing_file_closes(cx: &mut TestAppConte
             });
             redraw_overlay(&probe, cx);
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "a snapshot without the file must close the overlay"
             );
         },
@@ -838,7 +840,7 @@ fn snapshot_refresh_updates_header_status_letter(cx: &mut TestAppContext) {
                 "git-tree-row-changes-0-a.txt",
             );
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_status()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_target_status()),
                 Some('M'),
                 "sanity: the status letter starts at the click-time value"
             );
@@ -849,12 +851,12 @@ fn snapshot_refresh_updates_header_status_letter(cx: &mut TestAppContext) {
             });
             redraw_overlay(&probe, cx);
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_generation()),
                 loaded_gen + 1,
                 "the status refresh rides the refetch; generation still advances once"
             );
             assert_eq!(
-                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_target_status()),
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_target_status()),
                 Some('D'),
                 "the header status letter must follow the new snapshot, not the click"
             );
@@ -888,7 +890,7 @@ fn file_turning_conflicted_closes_overlay(cx: &mut TestAppContext) {
             });
             redraw_overlay(&probe, cx);
             assert!(
-                !owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "a file that moved into the conflicts section must close the overlay"
             );
         },

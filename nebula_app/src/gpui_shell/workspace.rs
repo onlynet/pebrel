@@ -55,7 +55,6 @@ use keyboard_bindings::{
     STATIC_DEFAULT_COMBOS, custom_workspace_binding, default_workspace_bindings, gpui_binding_combo,
 };
 mod details_panel;
-mod diff_overlay;
 mod documents;
 mod export;
 mod file_tree;
@@ -706,7 +705,6 @@ pub struct NebulaWorkspace {
     /// `vcs_commit_message`，不经旧壳的内部输入状态机。
     git_commit_input: vcs_panel::CommitInput,
     vcs_list: vcs_panel::VcsList,
-    diff_overlay: diff_overlay::DiffOverlayState,
     /// Git 树"丢弃改动"的二次确认（路径）；任何其他 VCS 操作都清掉它。
     vcs_discard_confirm: Option<String>,
     /// 命令面板的行覆盖：`None` = 常规命令目录，`Some` = 某个专用列表
@@ -968,7 +966,6 @@ impl NebulaWorkspace {
             _command_manager_subscription: command_manager_subscription,
             git_commit_input,
             vcs_list: vcs_panel::VcsList::default(),
-            diff_overlay: diff_overlay::DiffOverlayState::default(),
             vcs_discard_confirm: None,
             palette_override: None,
             shell_picker_open: false,

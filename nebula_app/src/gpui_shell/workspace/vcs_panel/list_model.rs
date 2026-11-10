@@ -55,6 +55,9 @@ pub(in crate::gpui_shell::workspace) struct VcsList {
     /// 全展开，SVN/History 行不经它。折叠状态跨快照与目录切换保留
     /// （键按相对路径，同名目录视为同一折叠意图）。
     pub(super) collapsed_dirs: std::collections::HashSet<String>,
+    /// diff 浮层状态随 VcsList 持有——浮层是抽屉行的详情面（点击产物），
+    /// 生命周期与抽屉视图一致；workspace.rs 行数棘轮不允许顶层字段。
+    pub(super) diff_overlay: diff_overlay::DiffOverlayState,
     rows: Vec<VcsRow>,
     lane_layout: (f32, f32),
     pub(super) scroll: gpui::ListState,
@@ -70,6 +73,7 @@ impl Default for VcsList {
             root: None,
             remote: false,
             collapsed_dirs: std::collections::HashSet::new(),
+            diff_overlay: diff_overlay::DiffOverlayState::default(),
             rows: Vec::new(),
             lane_layout: (0.0, 0.0),
             scroll: gpui::ListState::new(0, gpui::ListAlignment::Top, px(34.0)),
