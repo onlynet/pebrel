@@ -1932,3 +1932,16 @@ git commit -m "docs: align the diff overlay spec with the implemented touch surf
 - **占位符扫描**：无 TBD/TODO；Task 7 Step 4 的 unified 行渲染以逐条规格给出（颜色 token、行号槽宽、背景透明度、软换行、截断行、Error/Retry 控件均落到具体 Message ID 与 selector）；Task 5 头部以注释规格给出（Task 8/9 补交互件）。
 - **类型一致性**：`VcsRow::Dir` 六字段在 Task 2（构建）、3（variant 定义）、4（渲染解构）一致；`Fetched` 四变体与 `Phase` 六态在 Task 5/6/7/10 一致；`Site`/`Semantics` 可见性统一为 `pub(in crate::gpui_shell::workspace)`；跨模块私有字段（`RemoteGit.*`、`VcsList.remote`）一律经方法或 rows.rs 侧解析传递，无上游可见性扩张。
 - 已知计划内偏差（相对 spec，实现时按计划走）：远端未跟踪文件读改用 `head -c`（exec 单通道，避开 `git diff --no-index` 退出码 1 丢 stdout 的陷阱）而非 spec 所写 SFTP 通道；未跟踪截断提示由渲染层拼接。两处均在 Task 12 的 spec 数字/非目标修订时一并记录。
+
+### 执行期偏差补记（控制器授权）
+
+- Task 2: VcsRow::Dir 变体与 rows.rs 占位渲染臂随 Task 2 落地（E0004 穷尽性）；DirNode 去 name 字段；SectionCtx 重构（clippy too_many_arguments）。
+- Task 3: 冲突路径预过滤修复计划缺陷（staged/unstaged 过滤后再树化）；section 闭包因借用冲突移入 else 块；heading message 参数化（Task 3 评审 nit）。
+- Task 4: 文件行按路径深度渲染时缩进（设计保真修复）；粘性折叠持久测试。
+- Task 5: Site PartialEq、判等含 remote、SVN 门控、快照 Some→None 关闭、owned 捕获、pub(super) mod fetch。
+- Task 7: Fetched Debug 计数、DISPLAY_LINES pub(super)、空 diff→NoChanges、读失败→Error、take-before-collect、reset_with_uniform_height、too_large 文案泛化（i18n 值变更）。
+- Task 8: 切换重置列表计数（Critical 修复）+ loaded_item_count 单一权威 + band_row 去重。
+- Task 9: IconName::Close/xsmall、blur 守卫、open 签名加 window。
+- Task 10: 远端 untracked 绝对路径（exec cwd=HOME）、remote_exec cfg 对（确定性调度器）、--no-optional-locks 与错误 log::debug 随 Task 11 落地。
+- Task 11: Files 清单外触碰 fetch.rs/fetch_tests.rs/remote_git.rs（两个一行修复 + test_snapshot 测试缝）；Untracked 语义纳入冲突排除。
+- T12: 架构棘轮（workspace.rs ≤基线行数）要求浮层模块移挂 vcs_panel、DiffOverlayState 收纳进 VcsList（净零上游行）。

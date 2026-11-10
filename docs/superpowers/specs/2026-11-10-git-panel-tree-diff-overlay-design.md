@@ -2,7 +2,7 @@
 
 - 日期：2026-11-10
 - 分支：`feat/sidebar_tree_v232`
-- 状态：待评审（brainstorming 产出，未实现）
+- 状态：已实现（Task 1-11 落地；2026-11-11 对齐实际触碰面与实现裁定）
 
 ## 1. 背景与目标
 
@@ -23,32 +23,37 @@
 | 关闭路径 | ✕ 按钮 / Esc / active tab 变化或 settings 打开（即「点左侧任务栏关闭」） |
 | 未跟踪文件 | 全文按新增（绿色）显示；超过 2000 行截断并提示 |
 | 冲突文件 | 取「工作区 vs HEAD」，冲突标记原样渲染；双击仍走 merge editor |
-| 实现约束 | 增量优先、防上游合并冲突：主体逻辑放新增文件，上游代码文件只做追加式最小插入（合计约 16–18 行；i18n 词表 append 另计） |
+| 实现约束 | 增量优先、防上游合并冲突：主体逻辑放新增文件，上游代码文件做最小插入（落地实际：workspace.rs 净零、render.rs +4/−1、vcs_panel.rs +4、list_model.rs +105/−38、rows.rs +47/−1、remote_git.rs +27，合计 +187/−40；i18n 两表各 +13 行） |
 
 ## 3. 总体架构
 
 ### 3.1 新增文件（fork 侧资产，承载全部主体逻辑）
 
 ```
-nebula_app/src/gpui_shell/workspace/
+nebula_app/src/gpui_shell/workspace/vcs_panel/
 ├── diff_overlay.rs            # 浮层视图：头部、布局切换、键盘/Esc、关闭路径、状态机
 ├── diff_overlay/
 │   ├── fetch.rs               # 本地/远端 diff 取数，generation 防串
+│   ├── fetch_tests.rs
 │   ├── pair.rs                # Patch/Hunk → side-by-side / unified 行配对（适配层）
 │   └── tests.rs
-└── vcs_panel/
-    └── tree_rows.rs           # GitInfo 变更列表 → 目录树行构建 + 展开状态
+├── tree_rows.rs               # GitInfo 变更列表 → 目录树行构建 + 展开状态
+└── tree_rows_tests.rs
 ```
 
-### 3.2 上游文件触碰清单（全部为追加式插入点；代码文件合计约 16–18 行，i18n 词表 append 另计）
+落地形态与最初草案的差别：浮层模块挂在 `vcs_panel/` 下而非 `workspace/` 顶层——架构棘轮不允许 `workspace.rs` 超基线行数，`DiffOverlayState` 由 `VcsList` 持有（浮层是抽屉行的详情面，生命周期与抽屉视图一致），`workspace.rs` 保持净零。
+
+### 3.2 上游文件触碰清单（落地实际规模；树化接入集中在 list_model.rs，非纯 append）
 
 | 文件 | 改动 | 规模 |
 |---|---|---|
-| `workspace.rs` | `NebulaWorkspace` 结构体末尾追加字段 `diff_overlay: DiffOverlayState` | 1 行 |
-| `workspace/render.rs`（中心卡 `.children(content)` 后） | `when_some` 追加浮层 child | ~3 行 |
-| `vcs_panel/rows.rs`（Change 行 `on_click`） | 追加「弹 diff」调用；原选中行为保留 | ~5 行 |
-| `vcs_panel/list_model.rs` | `VcsRow` 枚举**末尾**追加 `Dir` 变体；`VcsList` 结构体追加 `expanded` 字段；`sync()` 行构建委托 `tree_rows.rs` | ~8 行 |
-| i18n（Message 枚举与各语言表） | 追加新 Message ID（纯 append） | 每表几行 |
+| `workspace.rs` | 无（浮层模块挂 vcs_panel、状态入 VcsList，行数棘轮净零） | +0/−0 |
+| `workspace/render.rs`（中心卡 `.children(content)` 后） | `when_some` 追加浮层 child | +4/−1 |
+| `vcs_panel.rs` | 追加 `mod diff_overlay;` 等模块挂载 | +4/−0 |
+| `vcs_panel/list_model.rs` | `VcsRow` 枚举追加 `Dir` 变体；`VcsList` 追加 `collapsed_dirs` 与 `diff_overlay` 字段；`sync()` 行构建委托 `tree_rows.rs` | +105/−38 |
+| `vcs_panel/rows.rs`（Change 行 `on_click`） | 追加「弹 diff」调用（site/semantics/remote 解析）；原选中行为保留 | +47/−1 |
+| `remote_git.rs` | 远端 diff/未跟踪取数命令支持 | +27/−0 |
+| i18n（`vcs.diff` 词组） | 追加 11 个词条（纯 append） | 两表各 +13 行 |
 
 防冲突策略：
 
@@ -60,7 +65,7 @@ nebula_app/src/gpui_shell/workspace/
 
 - **数据源**：`GitInfo`（`staged` / `unstaged` / `conflicts` 均为 `(status char, 相对路径)` 列表）。本地来自 `read_git`，远端来自 `remote_git_info`——同一载体，`tree_rows.rs` 不区分来源；`VcsList.remote` 标志继续只影响行内操作（远端 exec）与双击目标。
 - **行结构**：每个 section 内，目录行（▾/▸ + 本级目录名 + 文件计数，可折叠）在前，文件行（状态字母 + 文件名）随深度缩进。
-- **展开状态**：存于 `VcsList` 内新增 `expanded: HashSet<String>`（key = `section_id + 目录路径`），默认全部展开；不新增 workspace 字段。
+- **展开状态**：存于 `VcsList` 内新增 `collapsed_dirs: HashSet<String>`（key = 目录相对路径，同名目录视为同一折叠意图），默认全部展开；不新增 workspace 字段。
 - **排序**：目录行在前、同级按名称排序；文件行保持 git status 输出语义。
 - **行内操作**：stage / unstage / discard / resolve 等 hover 按钮原样保留在文件行；目录行不带操作按钮。
 - **SVN 与 History**：行模型走原 `VcsRow::Change` 平铺路径，不经过 `tree_rows.rs`。
@@ -82,6 +87,13 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 - `mode: Split | Unified` 属于浮层持久偏好，跨文件、跨会话内保留。
 - 语义（semantics）由行来源决定：`unstaged` → 工作区 vs index（`git diff -- <path>`）；`staged` → index vs HEAD（`git diff --cached -- <path>`）；`?` → 未跟踪全文；冲突 → `git diff HEAD -- <path>`。
 
+实现裁定的边界行为：
+
+- 快照 Some→None 直接关闭。
+- 文件转入冲突段/离开所在段即关闭（含 untracked 被 add 后）。
+- diff 语义冻结在点击时刻（`?`→`M` 后仍为全文视图直至重开）。
+- 快照驱动重取会回到 Loading 并重置滚动（后续切片可考虑行数不变时保位）。
+
 ### 5.2 视图
 
 - **头部**：状态字母徽标（沿用现有颜色映射）+ 相对路径 + 语义标签 + `SegmentedRow` 布局切换（对比/统一）+ ✕ 关闭按钮。
@@ -97,16 +109,16 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 ## 6. 数据获取与刷新（`fetch.rs`）
 
 - **本地**：后台线程跑 `git diff --no-color [--cached | HEAD] -- <path>`（`hidden_git_command`）；已跟踪二进制文件由 git diff 输出的 `Binary files … differ` 行识别，显示占位提示；未跟踪文件直接读盘（≤2000 行按新增渲染，超出截断并提示），其二进制判定 = 前 8KB 含 NUL 字节。
-- **远端**：`ssh_session::exec_capture` 运行同款 git 命令，预算常量沿用 `remote_git.rs` 的 `STATUS_BUDGET` 模式；远端未跟踪文件复用 `remote_files` 现有读取通道。
+- **远端**：`ssh_session::exec_capture` 运行同款 git 命令，预算常量沿用 `remote_git.rs` 的 `STATUS_BUDGET` 模式；远端未跟踪文件改用 `head -c` 经 exec 通道读原文（避开 `git diff --no-index` 退出码 1 丢 stdout 的陷阱），远端 root 冻结在点击时刻为已知局限。
 - **超时**：本地/远端均 15s 上限，超时进 Error 态可重试。
 - **刷新**：浮层 render 入口用 `Arc::ptr_eq` 比较 Git 快照（与 `VcsList::sync` 同款检测）——快照更新且文件仍在对应列表 → 自动重取；文件已不在 → 自动关闭浮层。
 - **生命周期**：generation 归 `DiffOverlayState` 所有，workspace entity 销毁即回收；旧 generation 结果一律丢弃（不覆盖新状态）。
 
 ## 7. 国际化
 
-新增 Message ID（命名以实现为准，均纯 append 进枚举与各语言表，回退合同遵循 `docs/internationalization.md`）：
+新增 Message ID（落地命名，均纯 append 进枚举与各语言表，回退合同遵循 `docs/internationalization.md`）：
 
-`VcsDiffWorktreeUnstaged`（工作区 · 未暂存）、`VcsDiffStagedHead`（已暂存 · vs HEAD）、`VcsDiffUntrackedFile`（未跟踪）、`VcsDiffConflictHead`（冲突 · vs HEAD）、`VcsDiffModeSplit`（拆分）、`VcsDiffModeUnified`（统一）、`VcsDiffClose`（关闭）、`VcsDiffBinaryFile`（二进制文件，不支持差异显示）、`VcsDiffTooLarge`（超过 {lines} 行，已截断）、`VcsDiffFailed`（无法加载差异）。重试按钮复用现有 `Message::CommonRetry`（与 `common.retry` 同源，避免重复英文源串触发 source_id 歧义）。
+`VcsDiffWorktreeUnstaged`（工作区 · 未暂存）、`VcsDiffStagedHead`（已暂存 · vs HEAD）、`VcsDiffUntracked`（未跟踪）、`VcsDiffConflictHead`（冲突 · vs HEAD）、`VcsDiffModeSplit`（拆分）、`VcsDiffModeUnified`（统一）、`VcsDiffClose`（关闭差异）、`VcsDiffBinary`（二进制文件，不显示差异）、`VcsDiffTooLarge`（内容过大，已截断显示 / "Content too large; display truncated"，无占位符）、`VcsDiffFailed`（无法加载差异）、`VcsDiffNoChanges`（无文本改动）。重试按钮复用现有 `Message::CommonRetry`（与 `common.retry` 同源，避免重复英文源串触发 source_id 歧义）。
 
 ## 8. 测试策略
 
@@ -131,6 +143,7 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 - 字符级 intra-line 高亮。
 - 目录级整组 stage/unstage/discard 操作。
 - 浮层内编辑文件、多文件 tab 式 diff 队列。
+- WSL 仓库的 diff 取数（本地 pane 命中 WSL 仓库时浮层走原生命令，预期落错误态；后续单独切片）。
 
 ## 11. 行数预算与风险
 
