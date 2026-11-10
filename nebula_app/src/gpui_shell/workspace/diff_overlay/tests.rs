@@ -438,6 +438,115 @@ fn overlay_renders_split_and_toggles_to_unified(cx: &mut TestAppContext) {
     );
 }
 
+/// 远端取数不可用必须落 Error（含重试钮）而不是停在 Loading：远端 Git 视图
+/// 的文件行走 Site::Remote，测试环境不发起远端 exec（网络 runtime 侧按
+/// 「连接不可用」收 Err），Loading 必须被 Error 取代。Task 10 前远端取数
+/// 分支缺失，点击后永远停在 Loading——本测试是该回归的钉子。
+#[gpui::test]
+fn remote_fetch_unavailable_lands_in_error_phase(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "src/a.rs".into())], ..GitInfo::default() },
+        |owner, probe, _root, cx| {
+            // 列表切到远端形态（生产由 render_remote_git sync）+ 绑定远端目标
+            // （生产由 route_remote_git 在聚焦远端 pane 时设置）：行点击才会
+            // 解析出 Site::Remote。
+            cx.update(|_, cx| {
+                owner.update(cx, |ws, _| {
+                    ws.remote_git.test_bind("dest", "/repo");
+                    ws.vcs_list.sync(
+                        Some(Arc::new(GitInfo {
+                            unstaged: vec![('M', "src/a.rs".into())],
+                            ..GitInfo::default()
+                        })),
+                        GitPanelView::Changes,
+                        Some(PathBuf::from("/repo")),
+                        true,
+                    );
+                });
+            });
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            redraw(cx);
+            let bounds =
+                cx.debug_bounds("git-tree-row-changes-0-src/a.rs").expect("file row rendered");
+            cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.is_open()),
+                "a remote file row must open the overlay"
+            );
+            assert!(
+                owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_phase_is_error()),
+                "an unavailable remote fetch must land in the error phase, not stay loading"
+            );
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-error")
+                .expect("the error body must render for a failed remote fetch");
+            cx.debug_bounds("diff-retry").expect("the retry button must be offered");
+        },
+    );
+}
+
+/// generation 作废合同（设计 §6 生命周期）：晚到的成功结果不得覆盖新状态。
+/// 打开 A（generation N）再打开 B（N+1），对 N 落一份 Ok(Untracked)：必须
+/// 整份丢弃；排空后浮层形态由当前请求（远端不可用 → Error）决定，而不是
+/// 被旧结果拉成 Loaded。
+#[gpui::test]
+fn stale_generation_result_is_dropped(cx: &mut TestAppContext) {
+    workspace_with_changes(cx, GitInfo::default(), |owner, _probe, _root, cx| {
+        let open = |cx: &mut gpui::VisualTestContext, path: &'static str| {
+            cx.update(|window, cx| {
+                owner.update(cx, |ws, cx| {
+                    ws.open_diff_overlay(
+                        fetch::Site::Remote { destination: "dest".into(), root: "/repo".into() },
+                        path.into(),
+                        fetch::Semantics::Untracked,
+                        '?',
+                        true,
+                        window,
+                        cx,
+                    );
+                });
+            });
+        };
+        open(cx, "a.txt");
+        let stale = owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation());
+        open(cx, "b.txt");
+        assert_eq!(
+            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_generation()),
+            stale + 1,
+            "opening another file must advance the generation"
+        );
+        cx.update(|_, cx| {
+            owner.update(cx, |ws, cx| {
+                ws.apply_fetch_result(
+                    stale,
+                    Ok(fetch::Fetched::Untracked {
+                        lines: vec!["stale".to_string()],
+                        truncated: false,
+                    }),
+                    cx,
+                );
+            });
+        });
+        assert!(
+            !owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_loaded()),
+            "a stale-generation success must be dropped wholesale"
+        );
+        cx.run_until_parked();
+        assert!(
+            owner.read_with(cx, |ws, _| ws.diff_overlay.overlay_phase_is_error()),
+            "after parking, the current generation's outcome must own the phase"
+        );
+    });
+}
+
 /// 模式是浮层持久偏好（设计 §5.1）：A 文件切到 unified 后关闭浮层，再点
 /// B 文件仍以 unified 打开；再切回 split 也生效。untracked 单行超宽文件
 /// 同时充当 split 单侧内容的等高验证：右列软换行成多行时，左列空占位

@@ -50,6 +50,24 @@ fn local_fetch_covers_staged_unstaged_untracked_binary() {
     );
 }
 
+/// 远端命令行构造：root 与路径一律经 ai_hook::remote::quote 单引号包裹
+/// （空格等安全到达远端 shell）；staged 加 --cached、冲突加 HEAD；未跟踪
+/// 不走 git diff（exec::capture 对非零退出丢 stdout，no-index 有差异时
+/// 退出码 1），用 head -c 按字节上限直读，且必须与仓库根拼成绝对路径
+/// ——exec 通道的工作目录是远端 HOME 而不是仓库根。
+#[test]
+fn remote_command_shapes_are_shell_safe() {
+    let site = fetch::Site::Remote { destination: "h".into(), root: "/my repo".into() };
+    let cmd = fetch::remote_command(&site, "src/a b.rs", fetch::Semantics::Staged);
+    assert!(cmd.starts_with("git -C '/my repo' diff"));
+    assert!(cmd.contains("--cached"));
+    assert!(cmd.contains("'src/a b.rs'"));
+    let conflict = fetch::remote_command(&site, "f.rs", fetch::Semantics::ConflictVsHead);
+    assert!(conflict.contains(" HEAD -- 'f.rs'"));
+    let untracked = fetch::remote_command(&site, "new.txt", fetch::Semantics::Untracked);
+    assert!(untracked.starts_with("head -c 262144 -- '/my repo/new.txt'"));
+}
+
 #[test]
 fn oversize_or_unparseable_diff_degrades_to_raw() {
     // 空输出（无改动）→ 空 Patch（落地端归入「无文本改动」），不渲染空白原文。

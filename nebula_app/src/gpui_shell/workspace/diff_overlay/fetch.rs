@@ -1,7 +1,9 @@
-//! diff 取数：本地后台线程（远端 SSH exec 在 Task 10 补）。命令语义与
-//! runtime_api::git 的 diff 对齐（--no-ext-diff --no-textconv --no-color），
-//! 但独立实现——上游文件不动（防合并冲突，设计文档 §3）。
+//! diff 取数：本地走后台线程，远端走 SSH exec 通道（remote_call 桥回 GPUI
+//! 执行器，与远端 Git 面板同一模式）。命令语义与 runtime_api::git 的 diff
+//! 对齐（--no-ext-diff --no-textconv --no-color），但独立实现——上游文件
+//! 不动（防合并冲突，设计文档 §3）。
 use super::*;
+use crate::ai_hook::remote::quote;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -61,6 +63,49 @@ impl std::fmt::Debug for Fetched {
             Self::Binary => f.write_str("Binary"),
         }
     }
+}
+
+/// 远端命令拼装：路径一律经 ai_hook::remote::quote 单引号包裹（与远端
+/// Git 面板同一转义规则，空格、`$` 都安全到达远端 shell）。未跟踪文件
+/// 不走 git diff——捕获层对非零退出直接丢 stdout，而
+/// `git diff --no-index` 有差异时退出码为 1，改用 `head -c` 按字节上限
+/// 直读全文。远端通道的工作目录是远端 HOME 而非仓库根，路径必须与根
+/// 拼成绝对形态（document_target 同款字符串拼接，不经 PathBuf 本地化）。
+pub(super) fn remote_command(site: &Site, path: &str, semantics: Semantics) -> String {
+    let Site::Remote { root, .. } = site else { unreachable!("remote_command on local site") };
+    if semantics == Semantics::Untracked {
+        return format!("head -c {UNTRACKED_BYTES} -- {}", quote(&format!("{root}/{path}")));
+    }
+    let mut cmd = format!("git -C {} diff --no-color --no-ext-diff --no-textconv", quote(root));
+    if semantics == Semantics::Staged {
+        cmd.push_str(" --cached");
+    } else if semantics == Semantics::ConflictVsHead {
+        cmd.push_str(" HEAD");
+    }
+    cmd.push_str(" -- ");
+    cmd.push_str(&quote(path));
+    cmd
+}
+
+/// 远端结果桥：生产路径经 remote_call 上网络 runtime 跑远端命令捕获
+/// （`None` = runtime 起不来，调用方按「连接不可用」处理）。测试环境不
+/// 发起远端命令——完成的 tokio 任务会从工作线程唤醒 GPUI 确定性测试
+/// 调度器（probe_ssh_group_head 同款取舍），返回 None 走同一错误合同。
+#[cfg(not(test))]
+async fn remote_exec(destination: &str, command: &str) -> Option<Result<String, ()>> {
+    let destination = destination.to_owned();
+    let command = command.to_owned();
+    super::super::remote_files::remote_call(|| async move {
+        crate::ssh_session::exec_capture(&destination, &command, b"", DIFF_BUDGET)
+            .await
+            .map_err(|_| ())
+    })
+    .await
+}
+
+#[cfg(test)]
+async fn remote_exec(_destination: &str, _command: &str) -> Option<Result<String, ()>> {
+    None
 }
 
 /// unified diff 参数（本地/远端共用；远端在 git -C 后追加）。
@@ -132,7 +177,8 @@ fn empty_patch() -> crate::native_result_model::diff::Patch {
 }
 
 /// 未跟踪文件全文读取。读失败（文件已消失等）走 Err → Error 态可重试，
-/// 不误报「二进制」；截断标记同时覆盖行数与字节上限两种成因。
+/// 不误报「二进制」；先按原字节做 8KB NUL 探针（避免全文扫描），再交给
+/// 本地/远端共用的 [`untracked_from_lossy`]。
 fn read_untracked(path: &Path) -> Result<Fetched, ()> {
     let bytes = std::fs::read(path).map_err(|_| ())?;
     let full_len = bytes.len();
@@ -142,14 +188,25 @@ fn read_untracked(path: &Path) -> Result<Fetched, ()> {
     }
     let bytes = &bytes[..full_len.min(UNTRACKED_BYTES)];
     let text = String::from_utf8_lossy(bytes);
+    Ok(untracked_from_lossy(&text, full_len))
+}
+
+/// 未跟踪全文 → 展示模型（本地字节与远端文本共用）：NUL 判二进制
+/// （from_utf8_lossy 保留 NUL 为 U+0000），行数上限截断。`full_len` 是
+/// 截断前的完整长度：本地传原始字节长；远端 head -c 已按字节上限截断，
+/// 真实长度不可知，输出顶到上限时按「可能还有更多」保守标记。
+fn untracked_from_lossy(text: &str, full_len: usize) -> Fetched {
+    if text.contains('\0') {
+        return Fetched::Binary;
+    }
     let mut lines: Vec<String> = text.lines().take(DISPLAY_LINES + 1).map(str::to_string).collect();
     let truncated = lines.len() > DISPLAY_LINES || full_len > UNTRACKED_BYTES;
     lines.truncate(DISPLAY_LINES);
-    Ok(Fetched::Untracked { lines, truncated })
+    Fetched::Untracked { lines, truncated }
 }
 
-/// 发起一次 diff 获取（本地分支；远端 Task 10）。generation 作废合同在
-/// apply 端。
+/// 发起一次 diff 获取（本地后台线程 / 远端 SSH 通道）。generation 作废
+/// 合同在 apply 端。
 pub(super) fn spawn(
     generation: u64,
     target: &super::OverlayTarget,
@@ -158,16 +215,46 @@ pub(super) fn spawn(
     let site = target.site.clone();
     let path = target.path.clone();
     let semantics = target.semantics;
-    if matches!(site, Site::Local { .. }) {
-        cx.spawn(async move |this, cx| {
-            let fetched =
-                cx.background_spawn(async move { local_blocking(&site, &path, semantics) }).await;
-            let _ = this.update(cx, |workspace, cx| {
-                workspace.apply_fetch_result(generation, fetched, cx);
-            });
-        })
-        .detach();
+    match site {
+        Site::Local { .. } => {
+            cx.spawn(async move |this, cx| {
+                let fetched = cx
+                    .background_spawn(async move { local_blocking(&site, &path, semantics) })
+                    .await;
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.apply_fetch_result(generation, fetched, cx);
+                });
+            })
+            .detach();
+        },
+        Site::Remote { .. } => {
+            let command = remote_command(&site, &path, semantics);
+            let Site::Remote { destination, .. } = site else { unreachable!() };
+            cx.spawn(async move |this, cx| {
+                let result = remote_exec(&destination, &command).await;
+                let fetched = match result {
+                    // 网络 runtime 起不来：与远端 Git 面板同款「连接不可用」。
+                    None => Err(()),
+                    Some(Ok(stdout)) => Ok(if semantics == Semantics::Untracked {
+                        // head -c 已按 UNTRACKED_BYTES 截断：输出顶到上限即按
+                        // 「还有更多」保守标记（恰好等于上限的文件会多一个
+                        // 截断提示，无害）。
+                        let full_len = if stdout.len() >= UNTRACKED_BYTES {
+                            UNTRACKED_BYTES + 1
+                        } else {
+                            stdout.len()
+                        };
+                        untracked_from_lossy(&stdout, full_len)
+                    } else {
+                        parse_diff_text(&stdout)
+                    }),
+                    Some(Err(())) => Err(()),
+                };
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.apply_fetch_result(generation, fetched, cx);
+                });
+            })
+            .detach();
+        },
     }
-    // 远端分支：Task 10（当前远端目标不会抵达这里——open_diff_overlay 对
-    // 无 overlay_target 的远端直接不弹）。
 }

@@ -170,6 +170,14 @@ impl RemoteGit {
     pub(super) fn snapshot_for_overlay(&self) -> Option<Arc<GitInfo>> {
         self.snapshot.clone()
     }
+
+    /// 测试缝：绑定远端目标（生产路径由 route_remote_git 在聚焦远端 pane 时
+    /// 设置 destination/root）；测试直接写入，驱动 rows 点击解析出远端 site。
+    #[cfg(test)]
+    pub(super) fn test_bind(&mut self, destination: &str, root: &str) {
+        self.destination = destination.to_string();
+        self.root = root.to_string();
+    }
 }
 
 /// 面板根的决策（与侧栏分组键同一优先序，见 [`super::task_groups_ssh`]）：

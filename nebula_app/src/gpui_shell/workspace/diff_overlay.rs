@@ -106,6 +106,12 @@ impl DiffOverlayState {
         matches!(self.phase, Phase::Loaded(_))
     }
 
+    /// 测试探针：内容是否落在 Error 态（远端取数不可用的回归断言用）。
+    #[cfg(test)]
+    fn overlay_phase_is_error(&self) -> bool {
+        matches!(self.phase, Phase::Error)
+    }
+
     /// 测试探针：伪装「打开时所基于的快照」，驱动 Some→None 关闭路径。
     #[cfg(test)]
     fn force_seen_snapshot(&mut self, snapshot: Option<Arc<GitInfo>>) {
@@ -458,6 +464,7 @@ impl NebulaWorkspace {
                         Button::new("diff-retry")
                             .label(language.text(Message::CommonRetry))
                             .small()
+                            .debug_selector(|| "diff-retry".to_string())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.retry_diff_fetch(cx);
                             })),
