@@ -337,7 +337,10 @@ impl Render for NebulaWorkspace {
                                     // 窗口底层统一绘图，此处不覆盖原有衬底。
                                     crate::gpui_shell::wallpaper::card_layer(cx),
                                 )
-                                .children(content),
+                                .children(content)
+                                .when_some(self.render_diff_overlay(window, cx), |card, overlay| {
+                                    card.child(overlay)
+                                }),
                         )
                             .child(
                                 // Both sidebar boundaries share the same snapped line and color.

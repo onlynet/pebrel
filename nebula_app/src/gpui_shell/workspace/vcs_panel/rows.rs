@@ -191,6 +191,11 @@ impl NebulaWorkspace {
                 let menu_path = relative_path.clone();
                 let merge_button_path = relative_path.clone();
                 let merge_open_path = relative_path.clone();
+                let click_root = root.clone();
+                // listener 须 'static：借自本帧 `row` 的 status/relative_path
+                // 在此取 owned 副本。
+                let click_status = *status;
+                let click_path = relative_path.clone();
                 let discard_armed = discard_confirm.as_deref() == Some(relative_path.as_str());
                 let git_discard = ops == RowOps::Unstaged && *status != '?';
                 let svn_revert = ops == RowOps::Svn && !matches!(*status, '?' | 'C');
@@ -437,6 +442,38 @@ impl NebulaWorkspace {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.side_panel.selected = Some(path.clone());
+                        // 单击 = 弹 diff 浮层（选中保留；双击编辑路径不变）。
+                        // site/semantics 在此解析：remote/root/ops 只在本模块可见；
+                        // SVN 行没有 git diff 语义，只保留选中。
+                        if is_git {
+                            let semantics = match (ops, click_status) {
+                                (_, '?') => diff_overlay::fetch::Semantics::Untracked,
+                                (RowOps::Staged, _) => diff_overlay::fetch::Semantics::Staged,
+                                (RowOps::Conflict, _) => {
+                                    diff_overlay::fetch::Semantics::ConflictVsHead
+                                },
+                                _ => diff_overlay::fetch::Semantics::Unstaged,
+                            };
+                            let site = if remote {
+                                this.remote_git.overlay_target().map(|(destination, root)| {
+                                    diff_overlay::fetch::Site::Remote { destination, root }
+                                })
+                            } else {
+                                click_root
+                                    .clone()
+                                    .map(|root| diff_overlay::fetch::Site::Local { root })
+                            };
+                            if let Some(site) = site {
+                                this.open_diff_overlay(
+                                    site,
+                                    click_path.clone(),
+                                    semantics,
+                                    click_status,
+                                    remote,
+                                    cx,
+                                );
+                            }
+                        }
                         cx.notify();
                     }))
                     .on_double_click(cx.listener(move |this, _, window, cx| {

@@ -159,6 +159,17 @@ impl RemoteGit {
         }
         Some((self.destination.clone(), format!("{}/{relative_path}", self.root)))
     }
+
+    /// diff 浮层取远端目标：destination 与 root 都就绪才有意义。
+    pub(super) fn overlay_target(&self) -> Option<(String, String)> {
+        (!self.destination.is_empty() && !self.root.is_empty())
+            .then(|| (self.destination.clone(), self.root.clone()))
+    }
+
+    /// 浮层的快照更新检测用（Arc 指针比较）。
+    pub(super) fn snapshot_for_overlay(&self) -> Option<Arc<GitInfo>> {
+        self.snapshot.clone()
+    }
 }
 
 /// 面板根的决策（与侧栏分组键同一优先序，见 [`super::task_groups_ssh`]）：
