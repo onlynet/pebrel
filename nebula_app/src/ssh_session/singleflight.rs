@@ -10,8 +10,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use super::{
-    AcquiredSession, NoopSshEventHost, ResolvedRoute, SessionError, SshDestination, SshEventHost,
-    SharedSession,
+    AcquiredSession, NoopSshEventHost, ResolvedRoute, SessionError, SharedSession, SshDestination,
+    SshEventHost,
 };
 
 fn establishment_registry() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
@@ -62,11 +62,8 @@ pub(super) async fn authenticated_route_serialized<H: SshEventHost>(
             .await;
     }
     let key = route.pool_key();
-    serialized(
-        &key,
-        super::authenticated_route(route, progress, unattended, allow_host_key_prompt),
-    )
-    .await
+    serialized(&key, super::authenticated_route(route, progress, unattended, allow_host_key_prompt))
+        .await
 }
 
 fn pane_counts() -> &'static StdMutex<HashMap<String, u64>> {
@@ -82,8 +79,7 @@ pub(super) struct PaneLease {
 
 impl PaneLease {
     pub(super) fn new(key: &str) -> Self {
-        let mut counts =
-            pane_counts().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut counts = pane_counts().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *counts.entry(key.to_owned()).or_insert(0) += 1;
         Self { key: key.to_owned() }
     }
@@ -114,8 +110,7 @@ impl PaneLease {
 
 impl Drop for PaneLease {
     fn drop(&mut self) {
-        let mut counts =
-            pane_counts().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut counts = pane_counts().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         match counts.get_mut(&self.key) {
             Some(count) if *count > 1 => *count -= 1,
             Some(_) => {
@@ -148,8 +143,7 @@ pub(super) async fn open_exec_channel_recovered(
     let acquired =
         super::authenticated_session_at(&destination, &profile, None::<&NoopSshEventHost>, 0)
             .await?;
-    match super::lifecycle::network("exec channel", acquired.session.channel_open_session()).await
-    {
+    match super::lifecycle::network("exec channel", acquired.session.channel_open_session()).await {
         Ok(channel) => Ok(channel),
         Err(error) => {
             super::evict_pooled_session(&acquired.key, &acquired.session).await;
@@ -165,15 +159,13 @@ mod tests {
 
     /// 与 lifecycle/tests.rs 同款：单线程 runtime + 10s 超时兜底（死锁转失败）。
     fn check(future: impl Future<Output = ()>) {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+            async {
                 tokio::time::timeout(std::time::Duration::from_secs(10), future)
                     .await
                     .expect("singleflight 测试超时（疑似死锁）");
-            });
+            },
+        );
     }
 
     fn establishment_registry_has(key: &str) -> bool {
@@ -230,8 +222,7 @@ mod tests {
     #[test]
     fn different_keys_establish_concurrently() {
         let inside = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-        let gate =
-            (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+        let gate = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
         check(async {
             let a = {
                 let (flag, gate) = (inside.0.clone(), gate.0.clone());
