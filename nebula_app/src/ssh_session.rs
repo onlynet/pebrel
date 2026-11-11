@@ -36,6 +36,7 @@ mod pane_connection;
 mod resume;
 mod route;
 mod sftp;
+mod singleflight;
 pub(crate) use forward::{LocalForward, open_local_forward};
 pub(crate) use integration::setup_cli as setup_ai_cli;
 pub use pane_connection::PaneConnection;
