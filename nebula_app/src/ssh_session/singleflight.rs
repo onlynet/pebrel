@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
-use super::{AcquiredSession, ResolvedRoute, SessionError, SshEventHost, SharedSession};
+use super::{
+    AcquiredSession, NoopSshEventHost, ResolvedRoute, SessionError, SshDestination, SshEventHost,
+    SharedSession,
+};
 
 fn establishment_registry() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
     static REGISTRY: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
@@ -120,6 +123,38 @@ impl Drop for PaneLease {
             },
             None => {},
         }
+    }
+}
+
+/// 后台 exec 的通道获取：解析地址 → 取（或按需建立）已认证连接 → 开独立
+/// exec 通道。与上游 `open_exec_channel` 的唯一差别在最后一步：开通道失
+/// 败立即摘除这条池连接——坏/满（如服务端 MaxSessions 打满）的连接不再
+/// 发给后续消费者，池在下一次用户驱动的建连时自愈。不主动重连：后台路
+/// 径重建连等于无凭据新连接，只会把密码框随机弹给用户。
+pub(super) async fn open_exec_channel_recovered(
+    raw_destination: &str,
+) -> Result<russh::Channel<russh::client::Msg>, SessionError> {
+    let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+    let raw = raw_destination.to_owned();
+    let (destination, profile) = tokio::task::spawn_blocking(move || {
+        let destination = SshDestination::resolve(&raw)?;
+        let profiles = crate::ssh_profiles::SshProfiles::load(&profiles_path)
+            .unwrap_or_else(|_| crate::ssh_profiles::SshProfiles::default());
+        Ok::<_, std::io::Error>((destination, profiles.for_destination(&raw)))
+    })
+    .await
+    .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
+
+    let acquired =
+        super::authenticated_session_at(&destination, &profile, None::<&NoopSshEventHost>, 0)
+            .await?;
+    match super::lifecycle::network("exec channel", acquired.session.channel_open_session()).await
+    {
+        Ok(channel) => Ok(channel),
+        Err(error) => {
+            super::evict_pooled_session(&acquired.key, &acquired.session).await;
+            Err(error)
+        },
     }
 }
 

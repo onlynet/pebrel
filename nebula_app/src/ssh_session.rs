@@ -1071,7 +1071,7 @@ pub(crate) async fn exec_capture(
     script: &[u8],
     budget: Duration,
 ) -> Result<String, SessionError> {
-    let channel = open_exec_channel(raw_destination).await?;
+    let channel = singleflight::open_exec_channel_recovered(raw_destination).await?;
     exec::capture(channel, command, script, budget, raw_destination).await
 }
 
