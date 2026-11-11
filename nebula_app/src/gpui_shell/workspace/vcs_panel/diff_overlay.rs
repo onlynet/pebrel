@@ -382,6 +382,10 @@ impl NebulaWorkspace {
             }))
             .absolute()
             .inset_0()
+            // 阻断浮层之下的鼠标命中（生产路径：终端的 mousedown 会无条件
+            // 抢走键盘焦点，Esc 的派发路径随之离开浮层）。不 occlude 时
+            // hit_test 不含遮挡语义，底层 hitbox 依然 hovered。
+            .occlude()
             // 与中心卡内容底色同一 token（render.rs 同款取法）：视觉上即
             // 「同一张卡上的另一层」，随主题/壁纸形态联动。
             .bg(crate::gpui_shell::theme::card_content_bg(cx))
@@ -539,16 +543,36 @@ impl NebulaWorkspace {
                 div()
                     .id("diff-overlay-body")
                     .debug_selector(|| "diff-overlay-body".to_string())
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
                     .child(
-                        gpui::list(scroll, move |index, _window, cx| {
+                        gpui::list(scroll.clone(), move |index, _window, cx| {
                             owner
                                 .update(cx, |workspace, cx| workspace.render_overlay_row(index, cx))
                                 .unwrap_or_else(|_| div().into_any_element())
                         })
                         .size_full(),
+                    )
+                    // 滑块住绝对定位宿主浮在列表右缘（file_tree 与组件库 Table
+                    // 同构——直接当普通 child 会参与布局挤占行高）。ListState
+                    // 实现了组件库 ScrollbarHandle，拖动直接驱动同一滚动模型。
+                    // Always：diff 长度/位置需要常驻可读（组件在无溢出时自隐藏）。
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .debug_selector(|| "diff-overlay-scrollbar".to_string())
+                            .w(px(16.0))
+                            .child(
+                                gpui_component::scroll::Scrollbar::vertical(&scroll)
+                                    .scrollbar_show(
+                                        gpui_component::scroll::ScrollbarShow::Always,
+                                    ),
+                            ),
                     ),
             )
             .when_some(tail, |body, tail| {

@@ -300,8 +300,13 @@ impl NebulaWorkspace {
                                     .invisible()
                                     .group_hover(row_group.clone(), |button| button.visible())
                             })
+                            .debug_selector(move || format!("vcs-discard-{section_id}-{index}"))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
+                                    // 行内操作是完整点击语义，不得再冒泡成行单击
+                                    //（选中 + 弹 diff 浮层）：组件库 Button 可点击时
+                                    // 不拦截冒泡，这里显式中止。
+                                    cx.stop_propagation();
                                     if this.vcs_discard_confirm.as_deref()
                                         == Some(discard_path.as_str())
                                     {
@@ -332,8 +337,10 @@ impl NebulaWorkspace {
                             .tooltip(language.text(Message::VcsStage))
                             .invisible()
                             .group_hover(row_group.clone(), |button| button.visible())
+                            .debug_selector(move || format!("vcs-stage-{section_id}-{index}"))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.vcs_discard_confirm = None;
                                     if this.vcs_list.remote {
                                         this.remote_git_stage(&stage_path, cx);
@@ -408,8 +415,10 @@ impl NebulaWorkspace {
                             .tooltip(language.text(Message::VcsUnstage))
                             .invisible()
                             .group_hover(row_group.clone(), |button| button.visible())
+                            .debug_selector(move || format!("vcs-unstage-{section_id}-{index}"))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.vcs_discard_confirm = None;
                                     if this.vcs_list.remote {
                                         this.remote_git_unstage(&unstage_path, cx);
@@ -433,8 +442,10 @@ impl NebulaWorkspace {
                             .ghost()
                             .xsmall()
                             .tooltip(language.text(Message::VcsResolveInMergeEditor))
+                            .debug_selector(move || format!("git-resolve-{section_id}-{index}"))
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
+                                    cx.stop_propagation();
                                     this.open_git_merge_tab(merge_button_path.clone(), window, cx);
                                 },
                             )),

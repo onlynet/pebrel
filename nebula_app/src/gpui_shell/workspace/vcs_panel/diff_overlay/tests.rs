@@ -9,20 +9,46 @@ use std::sync::Arc;
 /// 几何与 render.rs 一致——盖「中间卡」（自己的 relative 容器内
 /// absolute inset_0），不遮抽屉行；否则「浮层开着点其他文件」的真实
 /// 点击路径在测试里不可达。
-struct OverlayProbe(Entity<NebulaWorkspace>);
+///
+/// 卡内浮层之下再垫一层「底层元素」：track_focus + mousedown 无条件
+/// `window.focus(自己)`，逐行复刻终端视图的注册方式与抢焦点行为
+/// （terminal/view.rs 的 on_mouse_down 挂 div hitbox、
+/// pointer.rs 的第一句无条件 focus）。浮层若不 occlude 鼠标，点击内容区
+/// 时这个底层 hitbox 依然 hovered，键盘焦点会被它抢走——Esc 随之失效。
+struct OverlayProbe {
+    workspace: Entity<NebulaWorkspace>,
+    underlay_focus: gpui::FocusHandle,
+}
 impl Render for OverlayProbe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let underlay_focus = self.underlay_focus.clone();
         div()
             .relative()
             .w(px(640.0))
             .h(px(400.0))
             .flex()
-            .child(self.0.update(cx, |ws, cx| ws.render_vcs_list(cx)))
+            .child(self.workspace.update(cx, |ws, cx| ws.render_vcs_list(cx)))
             .child(
                 div()
                     .relative()
                     .w(px(320.0))
-                    .children(self.0.update(cx, |ws, cx| ws.render_diff_overlay(window, cx))),
+                    // 先画底层（生产：终端内容先挂载），浮层后画盖在上面
+                    //（render.rs 把浮层作为中心卡最后一个 child）。
+                    .child(
+                        div()
+                            .id("overlay-probe-underlay")
+                            .debug_selector(|| "overlay-probe-underlay".to_string())
+                            .absolute()
+                            .inset_0()
+                            .track_focus(&underlay_focus)
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                window.focus(&underlay_focus, cx);
+                            }),
+                    )
+                    .children(
+                        self.workspace
+                            .update(cx, |ws, cx| ws.render_diff_overlay(window, cx)),
+                    ),
             )
     }
 }
@@ -76,7 +102,10 @@ fn workspace_with_changes(
                 false,
             );
         });
-        let view = cx.new(|_| OverlayProbe(workspace.clone()));
+        let view = cx.new(|cx| OverlayProbe {
+            workspace: workspace.clone(),
+            underlay_focus: cx.focus_handle(),
+        });
         owner = Some(workspace);
         probe = Some(view.clone());
         Root::new(view, window, cx)
@@ -892,6 +921,177 @@ fn file_turning_conflicted_closes_overlay(cx: &mut TestAppContext) {
             assert!(
                 !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
                 "a file that moved into the conflicts section must close the overlay"
+            );
+        },
+    );
+}
+
+/// 行内操作按钮（丢弃/暂存/取消暂存）的点击不得冒泡成「打开 diff 浮层」：
+/// 组件库 Button 可点击时不拦截冒泡（button.rs 只在 disabled 时 stop），
+/// MouseUp 会继续走到行级 on_click——用户实测点「暂存」弹出了 diff。
+/// 丢弃首击只武装确认（纯状态），同样不得弹层。
+#[gpui::test]
+fn row_action_button_clicks_do_not_open_the_overlay(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo {
+            staged: vec![('M', "b.txt".into())],
+            unstaged: vec![('M', "a.txt".into()), ('M', "c.rs".into())],
+            ..GitInfo::default()
+        },
+        |owner, probe, _root, cx| {
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            // 行内按钮 hover 才可见：先把指针移到行上驱动 group hover，
+            // 重画一帧后按钮才有几何。
+            let hover = |cx: &mut gpui::VisualTestContext, point: gpui::Point<gpui::Pixels>| {
+                cx.simulate_mouse_move(point, None, Modifiers::default());
+                cx.run_until_parked();
+                redraw(cx);
+            };
+            let click = |cx: &mut gpui::VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
+                cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+                cx.run_until_parked();
+            };
+            redraw(cx);
+            // 暂存（changes 段 a.txt）。
+            let row = cx.debug_bounds("git-tree-row-changes-0-a.txt").expect("row rendered");
+            hover(cx, row.center());
+            let stage = cx.debug_bounds("vcs-stage-changes-0").expect("stage button rendered");
+            click(cx, stage);
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
+                "clicking the stage button must not open the diff overlay"
+            );
+            // 取消暂存（staged 段 b.txt）。
+            let row = cx.debug_bounds("git-tree-row-staged-0-b.txt").expect("staged row rendered");
+            hover(cx, row.center());
+            let unstage = cx.debug_bounds("vcs-unstage-staged-0").expect("unstage button rendered");
+            click(cx, unstage);
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
+                "clicking the unstage button must not open the diff overlay"
+            );
+            // 丢弃首击：只武装确认（无 IO），也不得弹层。
+            let row = cx.debug_bounds("git-tree-row-changes-1-c.rs").expect("second row rendered");
+            hover(cx, row.center());
+            let discard =
+                cx.debug_bounds("vcs-discard-changes-1").expect("discard button rendered");
+            click(cx, discard);
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
+                "clicking the discard button must not open the diff overlay"
+            );
+            assert_eq!(
+                owner.read_with(cx, |ws, _| ws.vcs_discard_confirm.clone()),
+                Some("c.rs".to_string()),
+                "the discard click must still arm its confirmation"
+            );
+        },
+    );
+}
+
+/// 在浮层内容区点击后键盘焦点不得落到浮层之下（生产里是终端的
+/// mousedown 无条件 focus 抢走焦点，Esc 的派发路径随之离开浮层）。
+/// probe 的底层元素复刻该机制；浮层必须 occlude 鼠标让底层 hitbox
+/// 不再 hovered。随后 Esc 仍然能关。
+#[gpui::test]
+fn clicking_overlay_content_keeps_focus_and_escape_closes(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "a.txt".into())], ..GitInfo::default() },
+        |owner, probe, root, cx| {
+            init_repo(&root);
+            std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+            run_git(&root, &["add", "a.txt"]);
+            std::fs::write(root.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            redraw(cx);
+            let row = cx.debug_bounds("git-tree-row-changes-0-a.txt").expect("file row rendered");
+            cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(row.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            redraw(cx);
+            cx.debug_bounds("diff-overlay-body").expect("loaded body mounted");
+            cx.update(|window, cx| {
+                assert!(
+                    owner.read(cx).vcs_list.diff_overlay.overlay_focused(window, cx),
+                    "an open overlay must hold keyboard focus before the content click"
+                );
+            });
+            // 在浮层内容区点击：位置同时落在底层元素的几何范围内。
+            let body = cx.debug_bounds("diff-overlay-body").expect("body mounted");
+            cx.simulate_mouse_down(body.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(body.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(
+                    owner.read(cx).vcs_list.diff_overlay.overlay_focused(window, cx),
+                    "clicking inside the overlay must not move keyboard focus beneath it"
+                );
+            });
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke { key: "escape".into(), ..Default::default() },
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.run_until_parked();
+            assert!(
+                !owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.is_open()),
+                "escape must close the overlay after an in-overlay click"
+            );
+        },
+    );
+}
+
+/// 内容超出视口的 diff 必须画竖向滚动条（组件库 Scrollbar 挂绝对定位
+/// 宿主，file_tree 同款）：diff 长度与当前位置需要常驻可读，滚动条
+/// 显隐走 Always（组件自身在无溢出时仍会隐藏）。
+#[gpui::test]
+fn overflowed_diff_body_renders_a_scrollbar(cx: &mut TestAppContext) {
+    workspace_with_changes(
+        cx,
+        GitInfo { unstaged: vec![('M', "big.txt".into())], ..GitInfo::default() },
+        |owner, probe, root, cx| {
+            init_repo(&root);
+            let base: Vec<String> = (0..80).map(|i| format!("line-{i}\n")).collect();
+            std::fs::write(root.join("big.txt"), base.concat()).unwrap();
+            run_git(&root, &["add", "big.txt"]);
+            let changed: Vec<String> = (0..80).map(|i| format!("line-{i}-changed\n")).collect();
+            std::fs::write(root.join("big.txt"), changed.concat()).unwrap();
+            let redraw = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    probe.update(cx, |_, cx| cx.notify());
+                    let _ = window.draw(cx);
+                });
+            };
+            redraw(cx);
+            let row = cx.debug_bounds("git-tree-row-changes-0-big.txt").expect("file row rendered");
+            cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(row.center(), MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            assert!(
+                owner.read_with(cx, |ws, _| ws.vcs_list.diff_overlay.overlay_loaded()),
+                "the big diff must land in the Loaded phase"
+            );
+            redraw(cx);
+            let bar = cx
+                .debug_bounds("diff-overlay-scrollbar")
+                .expect("an overflowed diff body must render a vertical scrollbar");
+            let body = cx.debug_bounds("diff-overlay-body").expect("scrolled body mounted");
+            assert!(
+                bar.right() >= body.right() - px(20.0) && bar.right() <= body.right() + px(2.0),
+                "the scrollbar must hug the right edge of the diff body"
             );
         },
     );
