@@ -1945,3 +1945,4 @@ git commit -m "docs: align the diff overlay spec with the implemented touch surf
 - Task 10: 远端 untracked 绝对路径（exec cwd=HOME）、remote_exec cfg 对（确定性调度器）、--no-optional-locks 与错误 log::debug 随 Task 11 落地。
 - Task 11: Files 清单外触碰 fetch.rs/fetch_tests.rs/remote_git.rs（两个一行修复 + test_snapshot 测试缝）；Untracked 语义纳入冲突排除。
 - T12: 架构棘轮（workspace.rs ≤基线行数）要求浮层模块移挂 vcs_panel、DiffOverlayState 收纳进 VcsList（净零上游行）。
+- 验收修复（2026-11-11，实机验收三缺陷，提交 52c3d1a5）：① git 行四个操作按钮 handler 首句 `stop_propagation`（组件库 Button 可点击时不拦截冒泡，点击会继续走到行级 on_click 弹浮层）+ 按钮 debug_selector（test-only）；② 浮层根 `occlude`（终端 mousedown 无条件抢键盘焦点，未遮挡时点击内容区后 Esc 派发路径离开浮层）；③ diff 体右缘挂组件库 `Scrollbar::vertical(&ListState)`（file_tree 同款绝对定位宿主，`Always` 显隐）。tests.rs 增三个红→绿测试 + probe 垫「底层抢焦点元素」复刻终端机制；rows.rs 追加面 +58/−1。

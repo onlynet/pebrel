@@ -23,7 +23,7 @@
 | 关闭路径 | ✕ 按钮 / Esc / active tab 变化或 settings 打开（即「点左侧任务栏关闭」） |
 | 未跟踪文件 | 全文按新增（绿色）显示；超过 2000 行截断并提示 |
 | 冲突文件 | 取「工作区 vs HEAD」，冲突标记原样渲染；双击仍走 merge editor |
-| 实现约束 | 增量优先、防上游合并冲突：主体逻辑放新增文件，上游代码文件做最小插入（落地实际：workspace.rs 净零、render.rs +4/−1、vcs_panel.rs +4、list_model.rs +105/−38、rows.rs +47/−1、remote_git.rs +27，合计 +187/−40；i18n 两表各 +13 行） |
+| 实现约束 | 增量优先、防上游合并冲突：主体逻辑放新增文件，上游代码文件做最小插入（落地实际：workspace.rs 净零、render.rs +4/−1、vcs_panel.rs +4、list_model.rs +105/−38、rows.rs +58/−1、remote_git.rs +27，合计 +198/−40；i18n 两表各 +13 行） |
 
 ## 3. 总体架构
 
@@ -51,7 +51,7 @@ nebula_app/src/gpui_shell/workspace/vcs_panel/
 | `workspace/render.rs`（中心卡 `.children(content)` 后） | `when_some` 追加浮层 child | +4/−1 |
 | `vcs_panel.rs` | 追加 `mod diff_overlay;` 等模块挂载 | +4/−0 |
 | `vcs_panel/list_model.rs` | `VcsRow` 枚举追加 `Dir` 变体；`VcsList` 追加 `collapsed_dirs` 与 `diff_overlay` 字段；`sync()` 行构建委托 `tree_rows.rs` | +105/−38 |
-| `vcs_panel/rows.rs`（Change 行 `on_click`） | 追加「弹 diff」调用（site/semantics/remote 解析）；原选中行为保留 | +47/−1 |
+| `vcs_panel/rows.rs`（Change 行 `on_click`） | 追加「弹 diff」调用（site/semantics/remote 解析）；原选中行为保留；验收修复：git 行四个操作按钮 handler 首句显式 `stop_propagation` + 按钮 debug_selector（test-only，release no-op） | +58/−1 |
 | `remote_git.rs` | 远端 diff/未跟踪取数命令支持 | +27/−0 |
 | i18n（`vcs.diff` 词组） | 追加 11 个词条（纯 append） | 两表各 +13 行 |
 
@@ -67,7 +67,7 @@ nebula_app/src/gpui_shell/workspace/vcs_panel/
 - **行结构**：每个 section 内，目录行（▾/▸ + 本级目录名 + 文件计数，可折叠）在前，文件行（状态字母 + 文件名）随深度缩进。
 - **展开状态**：存于 `VcsList` 内新增 `collapsed_dirs: HashSet<String>`（key = 目录相对路径，同名目录视为同一折叠意图），默认全部展开；不新增 workspace 字段。
 - **排序**：目录行在前、同级按名称排序；文件行保持 git status 输出语义。
-- **行内操作**：stage / unstage / discard / resolve 等 hover 按钮原样保留在文件行；目录行不带操作按钮。
+- **行内操作**：stage / unstage / discard / resolve 等 hover 按钮原样保留在文件行；目录行不带操作按钮。点击操作按钮是完整点击语义，不再冒泡成行单击（不选中、不弹浮层——组件库 Button 可点击时不拦截冒泡，handler 内显式 `stop_propagation`；验收修复）。
 - **SVN 与 History**：行模型走原 `VcsRow::Change` 平铺路径，不经过 `tree_rows.rs`。
 
 ## 5. diff 浮层
@@ -97,8 +97,8 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 ### 5.2 视图
 
 - **头部**：状态字母徽标（沿用现有颜色映射）+ 相对路径 + 语义标签 + `SegmentedRow` 布局切换（对比/统一）+ ✕ 关闭按钮。
-- **内容区**：`gpui::list` 虚拟列表，固定行高（等宽字体）。Split 模式左右两列（各自独立行号槽，删除/新增行背景着色，上下文行两列同现）；Unified 模式单列 `+/-` 行。左右行数由 `pair.rs` 配对保证一致，单滚动驱动，无独立滚动条同步问题。
-- **键盘/焦点**：打开时焦点进浮层 `FocusHandle`；Esc 关闭；↑↓ / PgUp / PgDn / Home / End 滚动；关闭后焦点归还终端 pane。（文本选择复制未随首版实现，见 §10 非目标。）
+- **内容区**：`gpui::list` 虚拟列表，固定行高（等宽字体）。Split 模式左右两列（各自独立行号槽，删除/新增行背景着色，上下文行两列同现）；Unified 模式单列 `+/-` 行。左右行数由 `pair.rs` 配对保证一致，单滚动驱动，无独立滚动条同步问题。右缘常驻竖向滚动条（组件库 `Scrollbar` 挂 `ListState`，file_tree 同款绝对定位宿主；显隐 `Always`，无溢出时组件自隐藏——验收修复）。
+- **键盘/焦点**：打开时焦点进浮层 `FocusHandle`；Esc 关闭；↑↓ / PgUp / PgDn / Home / End 滚动；关闭后焦点归还终端 pane。浮层根 `occlude` 鼠标：点击内容区不得把键盘焦点漏给浮层之下（终端的 mousedown 无条件抢焦点，未遮挡时 Esc 派发路径随之离开浮层——验收修复）。（文本选择复制未随首版实现，见 §10 非目标。）
 
 ### 5.3 关闭路径实现
 
@@ -149,6 +149,6 @@ Loaded/Error 期间单击其他文件 → 同上；单击同一文件 → 无操
 
 ## 11. 行数预算与风险
 
-- 单文件控制在 800 行提示线内（超出拆子模块），`scripts/check_architecture.py --base <PR-base>` 验证。已接受的例外：`vcs_panel/diff_overlay.rs` 814 行（迁入 vcs_panel 后路径变长引发的 fmt 拆行所致，非逻辑膨胀）与 `diff_overlay/tests.rs`——均为 guidance 级提示、不阻断门禁；渲染拆分（`diff_overlay/view.rs`）留待该文件下次实质功能改动时顺带处理。
+- 单文件控制在 800 行提示线内（超出拆子模块），`scripts/check_architecture.py --base <PR-base>` 验证。已接受的例外：`vcs_panel/diff_overlay.rs` 838 行（迁入 vcs_panel 后路径变长引发的 fmt 拆行 + 验收修复的 occlude/滚动条，非逻辑膨胀）与 `diff_overlay/tests.rs`（1098 行）——均为 guidance 级提示、不阻断门禁；渲染拆分（`diff_overlay/view.rs`）留待该文件下次实质功能改动时顺带处理。
 - 主要合并风险集中在上游同期重构 `vcs_panel/list_model.rs` 或中心卡结构；两者均为单点小插入，冲突易手工解决。
 - `native_result_model/diff.rs` 解析器若配对信息不足（如缺逐行行号对），`pair.rs` 从 hunk 头行号推导，不修改解析器。
