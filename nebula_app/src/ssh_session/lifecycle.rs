@@ -184,6 +184,7 @@ pub(super) async fn run<H: SshEventHost>(
         .await??;
         let mut acquired =
             super::authenticated_session_at(&resolved, &profile, Some(&event_proxy), 0).await?;
+        let _pane_lease = super::singleflight::PaneLease::new(&acquired.key);
         let (mut channel, hook_token) = match open_shell(
             &acquired,
             initial_size,
@@ -222,7 +223,7 @@ pub(super) async fn run<H: SshEventHost>(
             never = resume::monitor(&acquired.session, identity, resume_target.as_ref(), &event_proxy) => match never {},
         };
         if result.is_err() || acquired.session.is_closed() {
-            super::evict_pooled_session(&acquired.key, &acquired.session).await;
+            _pane_lease.evict_if_last(&acquired.session).await;
         }
         result
     };
