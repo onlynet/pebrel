@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
-use super::{AcquiredSession, ResolvedRoute, SshEventHost, SessionError};
+use super::{AcquiredSession, ResolvedRoute, SessionError, SshEventHost, SharedSession};
 
 fn establishment_registry() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
     static REGISTRY: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
@@ -66,6 +66,63 @@ pub(super) async fn authenticated_route_serialized<H: SshEventHost>(
     .await
 }
 
+fn pane_counts() -> &'static StdMutex<HashMap<String, u64>> {
+    static COUNTS: OnceLock<StdMutex<HashMap<String, u64>>> = OnceLock::new();
+    COUNTS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// 一个 pane 对某 pool_key 连接的使用权。Drop 释放计数——`lifecycle::run`
+/// 的任何提前返回（如首次开 shell 失败的 `return Err`）也不会泄漏。
+pub(super) struct PaneLease {
+    key: String,
+}
+
+impl PaneLease {
+    pub(super) fn new(key: &str) -> Self {
+        let mut counts =
+            pane_counts().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *counts.entry(key.to_owned()).or_insert(0) += 1;
+        Self { key: key.to_owned() }
+    }
+
+    fn users(&self) -> u64 {
+        pane_counts()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&self.key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 计数含自身；`users() <= 1` 即本 pane 是该连接的最后一个使用者。
+    pub(super) fn is_last_pane(&self) -> bool {
+        self.users() <= 1
+    }
+
+    /// 上游清理分支（lifecycle.rs）的守卫版驱逐：仅当本 pane 是最后使用
+    /// 者才驱逐。共享会话被其他 pane 正常使用时，单个 pane 的通道错误不
+    /// 再把池条目误摘。
+    pub(super) async fn evict_if_last(&self, session: &SharedSession) {
+        if self.is_last_pane() {
+            super::evict_pooled_session(&self.key, session).await;
+        }
+    }
+}
+
+impl Drop for PaneLease {
+    fn drop(&mut self) {
+        let mut counts =
+            pane_counts().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match counts.get_mut(&self.key) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                counts.remove(&self.key);
+            },
+            None => {},
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +146,30 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(key)
+    }
+
+    fn pane_users(key: &str) -> u64 {
+        pane_counts()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn pane_lease_counts_users_and_releases_on_drop() {
+        assert_eq!(pane_users("lease-key"), 0);
+        let first = PaneLease::new("lease-key");
+        assert_eq!(pane_users("lease-key"), 1);
+        let second = PaneLease::new("lease-key");
+        assert_eq!(pane_users("lease-key"), 2);
+        assert!(!first.is_last_pane());
+        assert!(!second.is_last_pane());
+        drop(second);
+        assert!(first.is_last_pane());
+        drop(first);
+        assert_eq!(pane_users("lease-key"), 0);
     }
 
     #[test]
