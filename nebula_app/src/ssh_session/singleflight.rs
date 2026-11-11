@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
+use super::{AcquiredSession, ResolvedRoute, SshEventHost, SessionError};
+
 fn establishment_registry() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
     static REGISTRY: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
@@ -40,6 +42,28 @@ async fn serialized<T>(key: &str, inner: impl Future<Output = T>) -> T {
     drop(permit);
     release_establishment(key);
     result
+}
+
+/// 并发首连的 single-flight 门卫：同 pool_key 的建连互斥排队。上游
+/// `authenticated_route` 开头即查池，等待者拿到锁后自动命中胜者刚插入的
+/// 池条目，因此上游函数体保持零改动。`unattended`（设置页连接测试）维
+/// 持上游语义直通，不参与排队。
+pub(super) async fn authenticated_route_serialized<H: SshEventHost>(
+    route: &ResolvedRoute,
+    progress: Option<&H>,
+    unattended: bool,
+    allow_host_key_prompt: bool,
+) -> Result<AcquiredSession, SessionError> {
+    if unattended {
+        return super::authenticated_route(route, progress, unattended, allow_host_key_prompt)
+            .await;
+    }
+    let key = route.pool_key();
+    serialized(
+        &key,
+        super::authenticated_route(route, progress, unattended, allow_host_key_prompt),
+    )
+    .await
 }
 
 #[cfg(test)]

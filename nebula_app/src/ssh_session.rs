@@ -721,7 +721,7 @@ async fn authenticated_session_at<H: SshEventHost>(
     depth: u8,
 ) -> Result<AcquiredSession, SessionError> {
     let route = resolve_connection_route(destination, profile, depth, None).await?;
-    authenticated_route(&route, progress, false, true).await
+    singleflight::authenticated_route_serialized(&route, progress, false, true).await
 }
 
 async fn resolve_connection_route(
@@ -874,7 +874,7 @@ async fn open_transport(
         RouteTransport::Jump(jump) => {
             let spec = &jump.destination.original;
             info!("经跳板 {spec} 连接 {}:{}", destination.host, destination.port);
-            let acquired = Box::pin(authenticated_route(
+            let acquired = Box::pin(singleflight::authenticated_route_serialized(
                 jump,
                 None::<&NoopSshEventHost>,
                 unattended,
