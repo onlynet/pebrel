@@ -460,6 +460,7 @@ impl server::Handler for Loopback {
                 "disabled",
                 "pebrel-hook",
                 "bridge.py",
+                "remote_tmux.py",
                 "shell.py",
                 "bashrc",
                 ".zshenv",
@@ -1602,4 +1603,5 @@ fn ssh_echo_keeps_draining_while_a_large_input_waits_for_window_space() {
     });
 }
 
+mod keepalive;
 mod sftp;

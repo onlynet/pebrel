@@ -156,18 +156,13 @@ pub(super) fn default_workspace_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-o", OpenQuickJump, None),
     ];
-    // ctrl-c 复制与 Shift+Insert 粘贴都是 Windows/Linux 终端惯例（macOS
-    // 上 cmd-c 复制、Insert 透传不注册；shift-insert 是旧壳 winit 表
-    // `Insert+SHIFT → PasteSelection` 的 GPUI 对应物）。不绑 shift-insert
-    // 的话按键会被编成 `\x1b[2;2~` 发进 PTY，agent 输入框（Claude Code
-    // 等）收不到粘贴；同一惯例也补进输入框上下文（重命名/对话框），与
-    // ctrl-v 同待遇。运行时判定不占平台 cfg 预算。
+    // Shift+Insert 是 Windows/Linux 终端的粘贴惯例（旧壳 winit 表
+    // `Insert+SHIFT → PasteSelection` 的 GPUI 对应物）。不绑的话按键会被
+    // 编成 `\x1b[2;2~` 发进 PTY，agent 输入框（Claude Code 等）收不到
+    // 粘贴；同一惯例也补进输入框上下文（重命名/对话框），与 ctrl-v 同
+    // 待遇。macOS 维持透传（旧壳默认即 Esc 序列，Mac 键盘也没有 Insert），
+    // 运行时判定不占平台 cfg 预算。
     if std::env::consts::OS != "macos" {
-        bindings.push(KeyBinding::new(
-            "ctrl-c",
-            CopySelection,
-            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
-        ));
         bindings.push(KeyBinding::new(
             "shift-insert",
             PasteClipboard,

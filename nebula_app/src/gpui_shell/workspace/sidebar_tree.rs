@@ -305,7 +305,7 @@ impl NebulaWorkspace {
                     // 停在 [y/n]/口令/Press ENTER 上：也要你动手，但这是常态，
                     // 用 Attention 的警示形状去喊会把真正要紧的那个喊废。
                     SidebarActivity::WaitingInput => Some(
-                        Self::waiting_hand(symbol_family.clone(), label_px, theme.primary)
+                        Self::waiting_hand(label_px, theme.primary)
                             .into_any_element(),
                     ),
                     // 停在授权/提问上：同样是「有人在等你」，所以跟
@@ -313,7 +313,7 @@ impl NebulaWorkspace {
                     // 它会把整个回合卡住，值得 warning。⚠ 三角留给失败，拿它表
                     // 示「问你一句」会跟所有终端/编辑器的既有读法冲突。
                     SidebarActivity::Attention => Some(
-                        Self::waiting_hand(symbol_family.clone(), label_px, theme.warning)
+                        Self::waiting_hand(label_px, theme.warning)
                             .into_any_element(),
                     ),
                     SidebarActivity::Failed => Some(

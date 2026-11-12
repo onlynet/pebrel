@@ -48,7 +48,9 @@ const NEBULA_ICONS: &[(&str, &[u8])] = icons![
     "refresh",
     "spinner-arc",
     "spinner-track",
+    "waiting-hand",
     "phone",
+    "puzzle",
     "vcs-changes",
     "vcs-history",
     "vcs-conflict",
@@ -161,6 +163,8 @@ pub mod nav {
     pub const GIT_BRANCH: &str = "icons/nebula-git-branch.svg";
     pub const REFRESH: &str = "icons/nebula-refresh.svg";
     pub const PHONE: &str = "icons/nebula-phone.svg";
+    /// Lucide puzzle：设置页的插件分区。
+    pub const PUZZLE: &str = "icons/nebula-puzzle.svg";
     /// IDEA Commit 工具窗口同语义的“基线 + 提交节点”：工作区变更入口。
     pub const VCS_CHANGES: &str = "icons/nebula-vcs-changes.svg";
     /// 带分叉节点的提交线路：版本历史入口。
