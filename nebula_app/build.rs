@@ -11,6 +11,10 @@ use gl_generator::{Api, Fallbacks, GlobalGenerator, Profile, Registry};
 use std::fs::File;
 
 fn main() {
+    // 版本串内嵌 git HEAD，而 i18n 只把 rerun 钉在翻译文件上：仅发生提交时
+    // cargo 复用旧 build script 输出，把过期哈希打进新二进制。监视 .git 让
+    // git 状态变化触发重跑；输出指令不变时 cargo 仍判定新鲜，不会无谓重编。
+    println!("cargo:rerun-if-changed=../.git");
     i18n::generate(
         &Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("i18n"),
         &Path::new(&env::var("OUT_DIR").unwrap()).join("translations.rs"),
